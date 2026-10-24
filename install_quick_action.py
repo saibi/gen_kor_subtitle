@@ -30,14 +30,16 @@ def shell_command(script: str) -> str:
     # Automator는 PATH가 최소한이라 brew와 에이전트 CLI(~/.local/bin) 경로를 직접 추가하고,
     # 설치에 쓴 python(3.10+)을 그대로 사용한다 (/usr/bin/python3는 3.9일 수 있음).
     py, script, log = (shlex.quote(str(p)) for p in (sys.executable, HERE / script, LOG))
+    # 파일명은 AppleScript 소스가 아니라 argv로 넘긴다 (따옴표가 든 파일명이 코드로 실행되지 않게)
     return f"""export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
+notify() {{ osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title (item 2 of argv)' -e 'end run' "$1" "$2"; }}
 for f in "$@"; do
   name="${{f:t}}"
   echo "===== $(date) $f" >> {log}
   if {py} {script} "$f" >> {log} 2>&1; then
-    osascript -e "display notification \\"$name\\" with title \\"자막 생성 완료\\""
+    notify "$name" "자막 생성 완료"
   else
-    osascript -e "display notification \\"$name (로그: ~/Library/Logs/make_subtitle.log)\\" with title \\"자막 생성 실패\\""
+    notify "$name (로그: ~/Library/Logs/make_subtitle.log)" "자막 생성 실패"
   fi
 done
 """

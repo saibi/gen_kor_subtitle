@@ -42,4 +42,67 @@ tracks = [
 assert f.pick_track(tracks)["index"] == 5
 assert f.pick_track(tracks[:1]) is None
 
+# 빈 번역문은 거부 (FKS-R7)
+assert f.extract_json('{"1": "가", "2": " "}', {"1", "2"}) is None
+
+import io, json, tempfile, zipfile
+from pathlib import Path
+
+
+def make_zip(files: dict) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, text in files.items():
+            z.writestr(name, text)
+    return buf.getvalue()
+
+
+# 다중 CD zip은 거부, 자막 + nfo는 정상 (FKS-R5)
+one = "1\n00:00:01,000 --> 00:00:02,000\nHi\n"
+f.http_get = lambda url: make_zip({"Movie.CD1.srt": one, "Movie.CD2.srt": one})
+try:
+    f.os_download("x")
+    raise AssertionError("multi-CD zip accepted")
+except ValueError:
+    pass
+f.http_get = lambda url: make_zip({"Movie.srt": one, "Movie.nfo": "info"})
+assert f.os_download("x") == [(1000, 2000, "Hi")]
+
+with tempfile.TemporaryDirectory() as d:
+    d = Path(d)
+
+    # 제목 검색이 실패해도 해시 결과는 유지 (FKS-R4)
+    video = d / "Some.Movie.2010.mkv"
+    video.write_bytes(b"\0" * 200_000)
+    real_search = f.os_search
+
+    def fake_search(lang, cond):
+        if "moviehash" in cond:
+            return [{"download": "h1", "releasename": "r", "movie": "m"}]
+        raise OSError("blocked")
+
+    f.os_search = fake_search
+    assert f.os_candidates(video, "kor") == [({"download": "h1", "releasename": "r", "movie": "m"}, True)]
+    f.os_search = real_search
+
+    # 겹치는 대사도 SMI SYNC는 시간순 (FKS-R11)
+    smi = d / "o.smi"
+    f.write_smi([(1000, 5000, "가"), (3000, 6000, "나")], smi, "t")
+    starts = [int(x) for x in __import__("re").findall(r"Start=(\d+)", smi.read_text())]
+    assert starts == sorted(starts) == [1000, 3000, 5000, 6000]
+    assert "가<br>나" in smi.read_text()
+
+    # 손상된 캐시는 버리고 다시 번역, 101줄(묶음 2개)도 개수·타이밍 유지 (FKS-R8, M2)
+    f.CACHE_DIR = d / "cache"
+    cues = [(i * 1000, i * 1000 + 500, f"line {i}") for i in range(101)]
+    calls = []
+    f.translate_batch = lambda engine, batch, ctx, title, cwd: calls.append(len(batch)) or {k: f"번역 {k}" for k in batch}
+    f.translate(cues, "claude", "t")
+    cache = next(f.CACHE_DIR.glob("*.json"))
+    cache.write_text('{"1": "번역')  # 쓰다가 끊긴 캐시
+    calls.clear()
+    out = f.translate(cues, "claude", "t")
+    assert calls == [100, 1] and [(s, e) for s, e, _ in out] == [(s, e) for s, e, _ in cues]
+    assert json.loads(cache.read_text())["101"] == "번역 101"
+
 print("ok")

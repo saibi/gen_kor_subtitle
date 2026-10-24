@@ -123,7 +123,9 @@ ln -s "$(pwd)/make_subtitle.py" /opt/homebrew/bin/make-subtitle
 | `--dry-run` | `False` | 자막을 만들지 않고 사용 가능한 방법만 점검 |
 
 **번역**
-- API 키 없이, 로그인된 에이전트 CLI(`claude -p`, `codex exec`, `agy -p`)를 빈 임시 폴더에서 도구 사용을 끈 채 실행합니다.
+- API 키 없이, 로그인된 에이전트 CLI(`claude -p`, `codex exec`, `agy -p`)를 빈 임시 폴더에서 실행합니다.
+  - `claude`, `codex`: 내장 도구·MCP·웹 검색을 끄고 실행합니다 (codex의 셸은 read-only sandbox로 쓰기·네트워크 차단).
+  - `agy`: 도구를 끄는 옵션이 없어 `--mode plan`(파일 수정·명령 실행 안 함)과 `--sandbox`로만 제한합니다. 웹 조회 같은 읽기 도구는 완전히 막지 못할 수 있습니다.
 - 100줄씩 묶어 번역합니다. 영화 한 편(약 1,500줄)에 claude 기준 약 9분 걸립니다.
 - 번역된 묶음은 `~/.cache/gen_kor_subtitle/translations/`에 캐시됩니다. 사용량 한도 등으로 중간에 멈추면 다시 실행해서 이어서 진행할 수 있습니다.
 
