@@ -66,6 +66,17 @@ ln -s "$(pwd)/make_subtitle.py" /opt/homebrew/bin/make-subtitle
 ./make_subtitle.py "/Volumes/HDD1/movie/foreign_movie.mp4" -l ja
 ```
 
+### Finder 우클릭 메뉴로 실행 (macOS 빠른 동작)
+
+```bash
+./install_quick_action.py              # 설치
+./install_quick_action.py --uninstall  # 제거
+```
+
+설치 후 Finder에서 영상 파일 선택 → 우클릭 → **빠른 동작**(또는 **서비스**) → **한국어 자막 만들기**를 선택하세요. 기본 옵션으로 실행되며, 완료/실패 시 알림이 표시되고 로그는 `~/Library/Logs/make_subtitle.log`에 저장됩니다.
+
+- 설치 시 사용한 `python3`(3.10+)와 이 저장소 경로가 기록되므로, 저장소를 옮겼다면 다시 설치하세요.
+
 ### 4. 전체 CLI 옵션
 
 | 옵션 | 기본값 | 설명 |
