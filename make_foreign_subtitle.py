@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-gen_kor_subtitle (make_foreign_subtitle.py) — PLAN.md [FKS]
+gen_kor_subtitle (make_foreign_subtitle.py) — plan/FKS_plan_claude-opus-5-5.md
 외국영화의 한국어 자막(.ko.srt / .ko.smi)을 여러 방법을 차례로 시도해 만듭니다.
 
   1. embedded : 영상 내장 텍스트 자막 트랙 추출 (한국어 트랙이 있으면 그대로, 없으면 번역)
