@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Finder 우클릭 > 빠른 동작(서비스)에 '한국어 자막 만들기'를 설치/제거합니다.
+Finder 우클릭 > 빠른 동작(서비스)에 자막 생성 항목을 설치/제거합니다.
+  - 한국어 자막 만들기         : make_subtitle.py (한국영화 음성인식)
+  - 외국영화 한국어 자막 만들기 : make_foreign_subtitle.py
 
     ./install_quick_action.py              # 설치
     ./install_quick_action.py --uninstall  # 제거
@@ -15,17 +17,20 @@ import sys
 import uuid
 from pathlib import Path
 
-NAME = "한국어 자막 만들기"
-WORKFLOW = Path.home() / "Library/Services" / f"{NAME}.workflow"
+ACTIONS = {
+    "한국어 자막 만들기": "make_subtitle.py",
+    "외국영화 한국어 자막 만들기": "make_foreign_subtitle.py",
+}
+SERVICES = Path.home() / "Library/Services"
 LOG = Path.home() / "Library/Logs/make_subtitle.log"
-SCRIPT = Path(__file__).resolve().parent / "make_subtitle.py"
+HERE = Path(__file__).resolve().parent
 
 
-def shell_command() -> str:
-    # Automator는 PATH가 최소한이라 brew 경로를 직접 추가하고,
+def shell_command(script: str) -> str:
+    # Automator는 PATH가 최소한이라 brew와 에이전트 CLI(~/.local/bin) 경로를 직접 추가하고,
     # 설치에 쓴 python(3.10+)을 그대로 사용한다 (/usr/bin/python3는 3.9일 수 있음).
-    py, script, log = (shlex.quote(str(p)) for p in (sys.executable, SCRIPT, LOG))
-    return f"""export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+    py, script, log = (shlex.quote(str(p)) for p in (sys.executable, HERE / script, LOG))
+    return f"""export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 for f in "$@"; do
   name="${{f:t}}"
   echo "===== $(date) $f" >> {log}
@@ -38,10 +43,10 @@ done
 """
 
 
-def info_plist() -> dict:
+def info_plist(name: str) -> dict:
     return {
         "NSServices": [{
-            "NSMenuItem": {"default": NAME},
+            "NSMenuItem": {"default": name},
             "NSMessage": "runWorkflowAsService",
             "NSRequiredContext": {"NSApplicationIdentifier": "com.apple.finder"},
             "NSSendFileTypes": ["public.movie"],
@@ -49,7 +54,7 @@ def info_plist() -> dict:
     }
 
 
-def document_wflow() -> dict:
+def document_wflow(script: str) -> dict:
     string_list = {"Container": "List", "Types": ["com.apple.cocoa.string"]}
     action = {
         "AMAccepts": {**string_list, "Optional": True},
@@ -60,7 +65,7 @@ def document_wflow() -> dict:
         "ActionBundlePath": "/System/Library/Automator/Run Shell Script.action",
         "ActionName": "Run Shell Script",
         "ActionParameters": {
-            "COMMAND_STRING": shell_command(),
+            "COMMAND_STRING": shell_command(script),
             "CheckedForUserDefaultShell": True,
             "inputMethod": 1,  # 1 = 인수로 전달
             "shell": "/bin/zsh",
@@ -101,25 +106,29 @@ def refresh_services() -> None:
 def install() -> None:
     if sys.version_info < (3, 10):
         sys.exit(f"Python 3.10 이상이 필요합니다 (현재 {sys.executable} {sys.version.split()[0]}). 예: /opt/homebrew/bin/python3 {Path(__file__).name}")
-    if WORKFLOW.exists():
-        shutil.rmtree(WORKFLOW)
-    contents = WORKFLOW / "Contents"
-    contents.mkdir(parents=True)
-    (contents / "Info.plist").write_bytes(plistlib.dumps(info_plist()))
-    (contents / "document.wflow").write_bytes(plistlib.dumps(document_wflow()))
+    for name, script in ACTIONS.items():
+        workflow = SERVICES / f"{name}.workflow"
+        if workflow.exists():
+            shutil.rmtree(workflow)
+        contents = workflow / "Contents"
+        contents.mkdir(parents=True)
+        (contents / "Info.plist").write_bytes(plistlib.dumps(info_plist(name)))
+        (contents / "document.wflow").write_bytes(plistlib.dumps(document_wflow(script)))
+        print(f"설치 완료: {workflow}")
     refresh_services()
-    print(f"설치 완료: {WORKFLOW}")
-    print(f"Finder에서 영상 선택 > 우클릭 > 빠른 동작(또는 서비스) > {NAME}")
+    print(f"Finder에서 영상 선택 > 우클릭 > 빠른 동작(또는 서비스) > {' / '.join(ACTIONS)}")
     print(f"로그: {LOG}")
 
 
 def uninstall() -> None:
-    if not WORKFLOW.exists():
+    installed = [SERVICES / f"{name}.workflow" for name in ACTIONS if (SERVICES / f"{name}.workflow").exists()]
+    if not installed:
         print("설치된 빠른 동작이 없습니다.")
         return
-    shutil.rmtree(WORKFLOW)
+    for workflow in installed:
+        shutil.rmtree(workflow)
+        print(f"제거 완료: {workflow}")
     refresh_services()
-    print(f"제거 완료: {WORKFLOW}")
 
 
 if __name__ == "__main__":

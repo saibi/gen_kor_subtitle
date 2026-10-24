@@ -73,7 +73,7 @@ ln -s "$(pwd)/make_subtitle.py" /opt/homebrew/bin/make-subtitle
 ./install_quick_action.py --uninstall  # 제거
 ```
 
-설치 후 Finder에서 영상 파일 선택 → 우클릭 → **빠른 동작**(또는 **서비스**) → **한국어 자막 만들기**를 선택하세요. 기본 옵션으로 실행되며, 완료/실패 시 알림이 표시되고 로그는 `~/Library/Logs/make_subtitle.log`에 저장됩니다.
+설치 후 Finder에서 영상 파일 선택 → 우클릭 → **빠른 동작**(또는 **서비스**) → **한국어 자막 만들기**(한국영화) 또는 **외국영화 한국어 자막 만들기**를 선택하세요. 기본 옵션으로 실행되며, 완료/실패 시 알림이 표시되고 로그는 `~/Library/Logs/make_subtitle.log`에 저장됩니다.
 
 - 설치 시 사용한 `python3`(3.10+)와 이 저장소 경로가 기록되므로, 저장소를 옮겼다면 다시 설치하세요.
 
@@ -93,3 +93,42 @@ ln -s "$(pwd)/make_subtitle.py" /opt/homebrew/bin/make-subtitle
 | `--keep-wav` | `False` | 작업 완료 후 임시 추출된 `.wav` 오디오 파일을 삭제하지 않고 보관 |
 | `--overwrite-audio` | `False` | 기존 추출된 `.wav` 파일이 있어도 새로 추출 |
 | `--max-duration` | `8.0` | 단일 자막의 최대 표시 시간(초). 초과 시 5초로 자동 보정 (`0`이면 비활성화) |
+
+---
+
+## 외국영화 한국어 자막 (`make_foreign_subtitle.py`)
+
+외국영화에 대해 아래 방법을 순서대로 시도해 `<이름>.ko.srt`, `<이름>.ko.smi`를 만듭니다. 앞 방법이 성공하면 거기서 멈춥니다.
+
+1. **embedded** — 영상에 내장된 텍스트 자막 트랙을 추출합니다. 한국어 트랙이면 그대로 쓰고, 아니면(영어 우선) 번역합니다. 블루레이 이미지 자막(PGS)은 지원하지 않습니다.
+2. **online** — [opensubtitles.org](https://www.opensubtitles.org)에서 계정 없이 검색·다운로드합니다. 파일 해시 → 파일명(제목/연도/`SxxExx`) 순으로 찾고, 한국어 자막이 없으면 영어 자막을 받아 번역합니다.
+3. **whisper** — 원어 음성을 인식한 뒤 번역합니다.
+
+```bash
+./make_foreign_subtitle.py movie.mkv                          # embedded → online → whisper
+./make_foreign_subtitle.py movie.mkv --method embedded,online  # 지정한 방법만 (순서대로)
+./make_foreign_subtitle.py movie.mkv --translator codex        # 번역 엔진 선택
+./make_foreign_subtitle.py movie.mkv --keep-source             # 원어 자막도 <이름>.<언어>.srt로 보관
+./make_foreign_subtitle.py movie.mkv --dry-run                 # 내장 트랙/온라인 검색 결과만 점검
+```
+
+| 옵션 | 기본값 | 설명 |
+| :--- | :--- | :--- |
+| `-o`, `--output-dir` | 원본 영상 폴더 | 자막 저장 폴더 |
+| `--method` | `embedded,online,whisper` | 시도할 방법과 순서 |
+| `--translator` | `FKS_TRANSLATOR` 환경변수 또는 `claude` | 번역 엔진: `claude`, `codex`, `agy` |
+| `--source-lang` | `auto` | whisper 음성인식 원어 코드 |
+| `--keep-source` | `False` | 원어 자막 보관 |
+| `--force` | `False` | 한국어 자막(`.ko.srt`, `.ko.smi`, `.smi`)이 이미 있어도 다시 생성 |
+| `--dry-run` | `False` | 자막을 만들지 않고 사용 가능한 방법만 점검 |
+
+**번역**
+- API 키 없이, 로그인된 에이전트 CLI(`claude -p`, `codex exec`, `agy -p`)를 빈 임시 폴더에서 도구 사용을 끈 채 실행합니다.
+- 100줄씩 묶어 번역합니다. 영화 한 편(약 1,500줄)에 claude 기준 약 9분 걸립니다.
+- 번역된 묶음은 `~/.cache/gen_kor_subtitle/translations/`에 캐시됩니다. 사용량 한도 등으로 중간에 멈추면 다시 실행해서 이어서 진행할 수 있습니다.
+
+**싱크**
+- 파일 해시가 일치하는 온라인 자막은 그대로 사용합니다.
+- 제목으로 찾은 자막은 영상보다 길면 버리고, [`alass`](https://github.com/kaegi/alass) 또는 [`ffsubsync`](https://github.com/smacke/ffsubsync)가 설치되어 있으면 자동으로 싱크를 보정합니다. 없으면 경고만 표시합니다.
+
+자체 검증: `python3 test_make_foreign_subtitle.py`
