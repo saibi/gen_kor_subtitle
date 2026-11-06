@@ -5,3 +5,4 @@
 | ID | 계획 | 상태 |
 | :--- | :--- | :--- |
 | FKS | 외국영화 한국어 자막 생성기 (Foreign film Korean Subtitle) | 구현 완료, 리뷰 반영 완료 |
+| LNX | 구형 Intel MacBook Linux 자막 생성기 통합 | 구현 완료, 교차리뷰 중 |

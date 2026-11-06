@@ -2,6 +2,18 @@
 
 자막이 포함되지 않은 한국영화(및 외국어 영상) 파일에서 오디오 트랙을 추출하고, 로컬 AI 음성 인식(`whisper.cpp` + `Silero VAD`)을 활용해 한국어 `.srt` 및 `.smi` 자막 파일을 자동 생성하는 CLI 도구입니다.
 
+## 운영체제별 실행 방법
+
+| 환경 | 실행 스크립트 | 설치·사용 안내 |
+| :--- | :--- | :--- |
+| macOS (Apple Silicon 권장) | `make_subtitle.py` | 아래 기존 안내 / Homebrew |
+| Linux (구형 Intel MacBook 포함) | `make_subtitle_linux.py` | [Linux 전용 안내](README_LINUX.md) / `setup_linux.sh` |
+
+Linux 버전은 CPU 전용, 양자화 small 모델, 2스레드를 기본으로 사용합니다.
+구간 시험 및 처리 시간 기록도 지원합니다. 아래 macOS의 속도 설명은 Linux에 적용되지 않습니다.
+기존 Finder 빠른 동작과 `make_foreign_subtitle.py`는 이번 Linux 통합 대상에 포함하지 않습니다.
+
+
 Apple Silicon(M1/M2/M3/M4)의 **Metal GPU 가속**을 기본 활용하여 2시간 분량의 영화도 수 분 내에 빠르게 자막으로 변환합니다.
 
 ---
@@ -21,7 +33,7 @@ Apple Silicon(M1/M2/M3/M4)의 **Metal GPU 가속**을 기본 활용하여 2시�
 
 ## 요구 사항
 
-- **macOS** (Apple Silicon 권장) 또는 Linux
+- **macOS** (Apple Silicon 권장). Linux는 [별도 안내](README_LINUX.md) 참조
 - **Python 3.10+** (표준 라이브러리만 사용하므로 별도의 `pip install` 불필요)
 - **Homebrew** (`ffmpeg`, `whisper-cpp` 자동 설치용)
 

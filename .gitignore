@@ -22,3 +22,8 @@ models/
 *.smi
 *.vtt
 *.json
+
+# Linux local build and generated outputs
+/tools/
+/output/
+*.log
