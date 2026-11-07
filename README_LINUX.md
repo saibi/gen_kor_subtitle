@@ -61,7 +61,21 @@ CPU 전용, 한국어 고정, Silero VAD v6.2.0 사용. 입력은 상위 폴더 
 python3 make_subtitle_linux.py '../영상.mp4' -m large-v3-turbo-q5_0 --model-dir ./models -o ./output/full
 ```
 
-검증: `python3 -m unittest -v test_make_subtitle_linux` (5개 테스트).
+검증: `python3 -m unittest -v test_make_subtitle_linux` (9개 테스트).
 실제 ffmpeg 구간 추출, 영상 끝에서 잘린 구간의 길이 측정, 원본 WAV 보존,
 실패 시 임시 파일 정리, 잘못된 옵션 거부를 검증합니다.
 통합 전 모델 비교 4회 및 시간 순서 검증을 완료했습니다. 통합 후에는 10초 구간의 SRT/SMI 생성도 확인했습니다.
+
+## 통합 버전의 설치 및 오류 처리
+
+- `setup_linux.sh`는 위에서 검증한 whisper.cpp 리비전을 고정하여 빌드합니다.
+  기존 tools/whisper.cpp의 리비전이나 소스가 다르면 덮어쓰지 않고 안내합니다.
+- 실행 파일은 프로젝트 `tools/whisper.cpp/build/bin`을 우선하고 이후 시스템 PATH에서 찾습니다.
+- 기본 제공 모델과 VAD는 저장소에 기록된 SHA-256으로 검증합니다.
+  공유 `/tmp` 폴더의 모델은 자동으로 가져오지 않으며 동시 다운로드는 독립 임시 폴더를 씁니다.
+  `--model-path`로 사용자가 직접 지정한 모델은 이 체크섬 검증 대상이 아닙니다.
+- 일괄 처리 중 영상 하나가 실패하면 나머지를 계속 처리하고 마지막에 실패 개수와 종료 코드 1을 반환합니다.
+  `-o`가 같고 영상 이름이 겹치면 다운로드 전에 중단합니다. 같은 명령을 다시 실행하면 기존 출력은 덮어씁니다.
+- 자동 테스트의 실제 오디오 추출 검사는 ffmpeg가 없을 때 건너뜁니다.
+
+이 노트북에서 이미 받은 모델을 재사용하려면 `--model-dir ../kor_linux/models`를 지정하세요.

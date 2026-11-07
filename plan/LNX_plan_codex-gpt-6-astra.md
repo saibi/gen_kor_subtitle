@@ -34,3 +34,9 @@ make_subtitle_linux.py / setup_linux.sh / README_LINUX.md / test_make_subtitle_l
 | LNX-M1 | 공통 코드 재사용과 Linux 옵션 검증 |
 | LNX-M2 | 플랫폼별 안내 및 독립 설치 경로 |
 | LNX-M3 | 기존/신규 검사, 실제 인식, 교차리뷰 반영 |
+
+## 리뷰 반영 및 완료
+- LNX-M1~M3 완료: Linux 9개 검사, 기존 자체검증, 프로젝트 자체 엔진 실제 인식 통과.
+- 캐시/다운로드는 기존 함수를 래퍼로 호출하고 Linux에서 공유 /tmp 자동 가져오기를 비활성화한다.
+- 다운로드 SHA-256 검증과 고유 임시 경로, 엔진 리비전 고정, 일괄 처리 오류 격리/출력 충돌 검사를 추가했다.
+- 원본 macOS 세 스크립트는 변경하지 않았다.

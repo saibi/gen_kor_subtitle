@@ -2,6 +2,9 @@
 import contextlib
 import io
 import json
+import os
+import shutil
+import hashlib
 from pathlib import Path
 import subprocess
 import sys
@@ -24,7 +27,7 @@ class SubtitleTests(unittest.TestCase):
         import make_subtitle as mac
         args = self.args()
         assert args.model == 'small-q5_1'
-        assert args.threads == 2
+        assert args.threads == min(2, os.cpu_count() or 2)
         assert app.postprocess_and_convert is mac.postprocess_and_convert
         assert 'small-q5_1' not in mac.WHISPER_MODELS
         with patch.object(sys, 'argv', ['make_subtitle.py', 'input.mp4']):
@@ -46,12 +49,75 @@ class SubtitleTests(unittest.TestCase):
                 app.run_whisper(root / 'audio.wav', prefix, root / 'model.bin', vad,
                                 'ko', 2, ['srt', 'vtt'])
 
+    def test_verified_download_and_corrupt_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'model.bin'
+            good = b'verified-model'
+            def download(target, url, desc):
+                target.write_bytes(good)
+                return target
+            with patch.dict(app.MODEL_SHA256, {path.name: hashlib.sha256(good).hexdigest()}):
+                path.write_bytes(b'corrupted cache')
+                with patch.object(app, '_download_model', side_effect=download):
+                    app.ensure_file_downloaded(path, 'unused', 'model')
+                assert path.read_bytes() == good
+                path.write_bytes(b'original-corrupt')
+                with patch.object(app, '_download_model', side_effect=lambda target, *a: target):
+                    # Missing or invalid staging file must not replace the original cache.
+                    with self.assertRaises(OSError):
+                        app.ensure_file_downloaded(path, 'unused', 'model')
+                assert path.read_bytes() == b'original-corrupt'
+                assert not list(Path(tmp).glob('model-download-*'))
+
+    def test_batch_continues_after_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            videos = [Path(tmp) / f'{name}.mp4' for name in ('first', 'second')]
+            for video in videos:
+                video.touch()
+            argv = ['make_subtitle_linux.py', *map(str, videos), '--no-vad']
+            with patch.object(sys, 'argv', argv), patch.object(app, 'ensure_dependencies'), \
+                 patch.object(app, 'resolve_model_dir', return_value=Path(tmp)), \
+                 patch.object(app, 'ensure_file_downloaded', return_value=Path(tmp)/'model'), \
+                 patch.object(app, 'process_video', side_effect=[ValueError('bad audio'), None]) as process:
+                with self.assertRaises(SystemExit) as result:
+                    app.main()
+                assert result.exception.code == 1
+                assert process.call_count == 2
+
+    def test_rejects_bad_download_checksum(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'model.bin'
+            def corrupt(target, *args):
+                target.write_bytes(b'corrupt')
+                return target
+            with patch.dict(app.MODEL_SHA256, {path.name: '0' * 64}), \
+                 patch.object(app, '_download_model', side_effect=corrupt):
+                with self.assertRaises(ValueError):
+                    app.ensure_file_downloaded(path, 'unused', 'model')
+            assert not path.exists()
+            assert not list(Path(tmp).glob('model-download-*'))
+
+    def test_rejects_batch_output_collision_before_download(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            videos = [root / folder / 'same.mp4' for folder in ('a', 'b')]
+            for video in videos:
+                video.parent.mkdir()
+                video.touch()
+            argv = ['make_subtitle_linux.py', *map(str, videos), '-o', str(root/'out')]
+            with patch.object(sys, 'argv', argv), patch.object(app, 'ensure_dependencies') as deps:
+                with self.assertRaises(SystemExit) as result:
+                    app.main()
+                assert result.exception.code == 1
+                deps.assert_not_called()
+
     def test_invalid_arguments(self):
         for options in [('--duration', '0'), ('--start', 'nan'), ('-t', '0'), ('-f', 'foo')]:
             with self.subTest(options=options), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     self.args(*options)
 
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required for audio integration test")
     def test_extract_segment_and_preserve_source(self):
         # Real ffmpeg extraction verifies seeking, duration, and original WAV safety.
         with tempfile.TemporaryDirectory() as tmp:

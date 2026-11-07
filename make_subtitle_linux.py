@@ -6,6 +6,7 @@ Linux CPU 실행용. 도구는 setup_linux.sh로 설치하고 모델(small-q5_1,
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -22,8 +23,8 @@ from make_subtitle import (
     VAD_MODEL,
     log,
     err,
-    resolve_model_dir,
-    ensure_file_downloaded,
+    resolve_model_dir as _resolve_model_dir,
+    ensure_file_downloaded as _download_model,
     postprocess_and_convert,
 )
 
@@ -40,7 +41,47 @@ WHISPER_MODELS = {
 }
 
 
-def ensure_dependencies(auto_install: bool = True) -> None:
+# Hugging Face repository LFS SHA-256 metadata, verified 2026-11-07.
+MODEL_SHA256 = {'ggml-base-q5_1.bin': '422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898',
+ 'ggml-base.bin': '60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe',
+ 'ggml-large-v3-turbo-q5_0.bin': '394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2',
+ 'ggml-large-v3-turbo.bin': '1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69',
+ 'ggml-large-v3.bin': '64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2',
+ 'ggml-medium.bin': '6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208',
+ 'ggml-silero-v6.2.0.bin': '2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987',
+ 'ggml-small-q5_1.bin': 'ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb',
+ 'ggml-small.bin': '1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b'}
+
+
+def resolve_model_dir(custom_dir: str | None) -> Path:
+    # 명시적 저장 경로를 전달하여 공유 /tmp 모델을 자동으로 가져오지 않습니다.
+    directory = custom_dir or str(Path.home() / ".cache/whisper-cpp/models")
+    return _resolve_model_dir(directory)
+
+
+def model_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def ensure_file_downloaded(path: Path, url: str, desc: str) -> Path:
+    expected = MODEL_SHA256[path.name]
+    if path.is_file() and model_digest(path) == expected:
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # 독립된 다운로드 경로에서 검증한 후 교체하여 동시 실행의 .part 충돌을 방지합니다.
+    with tempfile.TemporaryDirectory(prefix="model-download-", dir=path.parent) as temp:
+        downloaded = _download_model(Path(temp) / path.name, url, desc)
+        if model_digest(downloaded) != expected:
+            raise ValueError(f"모델 SHA-256 검증 실패: {path.name}")
+        os.replace(downloaded, path)
+    return path
+
+
+def ensure_dependencies() -> None:
     """시스템 또는 프로젝트 안에 설치된 실행 파일을 확인합니다."""
     local_bin = Path(__file__).resolve().parent / "tools/whisper.cpp/build/bin"
     os.environ["PATH"] = str(local_bin) + os.pathsep + os.environ.get("PATH", "")
@@ -124,8 +165,7 @@ def run_whisper(
     subprocess.run(cmd, check=True)
     srt_path = Path(f"{output_prefix}.srt")
     if not srt_path.exists():
-        err(f"SRT 파일이 생성되지 않았습니다: {srt_path}")
-        sys.exit(1)
+        raise RuntimeError(f"SRT 파일이 생성되지 않았습니다: {srt_path}")
     return srt_path
 
 
@@ -315,7 +355,12 @@ def main() -> None:
         if not Path(video).expanduser().is_file():
             err(f"영상 파일을 찾을 수 없습니다: {video}")
             sys.exit(1)
-    ensure_dependencies(auto_install=True)
+    if args.output_dir:
+        stems = [Path(v).stem for v in args.videos]
+        if len(stems) != len(set(stems)):
+            err("같은 이름의 영상이 출력 폴더에서 충돌합니다. 각각 다른 -o 경로로 실행하세요.")
+            sys.exit(1)
+    ensure_dependencies()
     model_dir = resolve_model_dir(args.model_dir)
 
     if args.model_path:
@@ -339,8 +384,16 @@ def main() -> None:
             "Silero VAD 음성 감지 모델",
         )
 
+    failures = []
     for v in args.videos:
-        process_video(Path(v).expanduser().resolve(), args, model_path, vad_path)
+        try:
+            process_video(Path(v).expanduser().resolve(), args, model_path, vad_path)
+        except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+            err(f"처리 실패: {v}: {exc}")
+            failures.append(v)
+    if failures:
+        err(f"{len(failures)}개 영상 처리 실패 (총 {len(args.videos)}개)")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
