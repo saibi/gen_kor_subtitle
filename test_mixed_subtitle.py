@@ -121,7 +121,7 @@ class MixedTests(unittest.TestCase):
             (root / "model").touch()
             with wave.open(str(wav), "wb") as f:
                 f.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
-                f.writeframes(bytes(32000 * 5))
+                f.writeframes(bytes(32000 * 12))
 
             def whisper(cmd, **kwargs):
                 assert "-ng" in cmd and cmd.count("-f") == 3
@@ -131,7 +131,7 @@ class MixedTests(unittest.TestCase):
                             "transcription": [{"offsets": {"from": 20, "to": 2000}, "text": text}]}
                     (root / f"speech-{index}.json").write_text(json.dumps(data))
 
-            with patch.object(mixed, "speech_ranges", return_value=[(0, 16000), (24000, 40000), (64000, 80000)]), \
+            with patch.object(mixed, "speech_ranges", return_value=[(0, 16000), (56000, 104000), (140000, 188000)]), \
                  patch.object(mixed.subprocess, "run", side_effect=whisper), \
                  patch.object(mixed, "translate_selected", return_value={1: "또 봐요.", 2: "안녕히 가세요."}) as translate:
                 result = mixed.transcribe_mixed(wav, root, root / "model", root / "vad", 2, "claude",
@@ -139,8 +139,8 @@ class MixedTests(unittest.TestCase):
             assert translate.call_args.args == (["한국어.", "See you.", "さようなら。"], [1, 2], "claude")
             assert [(s["offsets"]["from"], s["offsets"]["to"], s["text"], s["source_language"])
                     for s in result["transcription"]] == [
-                        (20, 1000, "한국어.", "ko"), (1520, 2500, "또 봐요.", "en"),
-                        (4020, 5000, "안녕히 가세요.", "ja"),
+                        (20, 1000, "한국어.", "ko"), (3520, 5500, "또 봐요.", "en"),
+                        (8770, 10750, "안녕히 가세요.", "ja"),
                     ]
             assert mixed.needs_translation("잠깐. I'll see you tomorrow.", "ko")
             assert mixed.needs_translation("일본어로 さようなら。", "ko")
@@ -156,7 +156,7 @@ class MixedTests(unittest.TestCase):
             model.touch()
             with wave.open(str(wav), "wb") as audio:
                 audio.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
-                audio.writeframes(bytes(2 * 1600 * 33))
+                audio.writeframes(bytes(2 * 40000 * 33))
 
             def whisper(cmd, **kwargs):
                 for position, arg in enumerate(cmd):
@@ -172,16 +172,50 @@ class MixedTests(unittest.TestCase):
                 empty = mixed.transcribe_mixed(wav, root, model, root / "vad", 2, None)
                 assert app.postprocess_and_convert(root / "empty.srt", None, "empty", transcript=empty) == 0
                 cli.assert_not_called()
-                vad.return_value = [(i * 1600, (i + 1) * 1600) for i in range(33)]
+                vad.return_value = [(i * 40000, i * 40000 + 1600) for i in range(33)]
                 transcript = mixed.transcribe_mixed(wav, root, model, root / "vad", 2, None)
                 assert [call.args[0].count("-f") for call in cli.call_args_list] == [32, 1]
-                assert transcript["transcription"][-1]["offsets"] == {"from": 3200, "to": 3280}
+                assert transcript["transcription"][-1]["offsets"] == {"from": 80000, "to": 80080}
                 translate.assert_not_called()
                 model.write_bytes(b"lmgg" + (51864).to_bytes(4, "little"))
                 vad.reset_mock()
                 with self.assertRaisesRegex(ValueError, "다국어 Whisper"):
                     mixed.transcribe_mixed(wav, root, model, root / "vad", 2, None)
                 vad.assert_not_called()
+
+    def test_groups_speech_and_rereads_short_foreign_guesses_as_korean(self):
+        s = 16000
+        assert mixed.group_ranges([(0, s), (2 * s, 3 * s), (6 * s, 7 * s), (7 * s, 33 * s)]) == [
+            (0, 3 * s), (6 * s, 7 * s), (7 * s, 33 * s),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wav = root / "audio.wav"
+            (root / "model").touch()
+            with wave.open(str(wav), "wb") as f:
+                f.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                f.writeframes(bytes(2 * 20 * s))
+            calls = []
+
+            def whisper(cmd, **kwargs):
+                lang = cmd[cmd.index("-l") + 1]
+                calls.append((lang, cmd.count("-f")))
+                guesses = [("ko", "응."), ("zh", "嗯"), ("en", "Hello there.")] if lang == "auto" else [("ko", "응.")]
+                for index, (detected, text) in enumerate(guesses[:cmd.count("-f")]):
+                    data = {"model": {"multilingual": True}, "result": {"language": detected},
+                            "transcription": [{"offsets": {"from": 0, "to": 500}, "text": text}]}
+                    (root / f"speech-{index}.json").write_text(json.dumps(data))
+
+            # 1s Korean, 1s misdetected as zh, 4s real English
+            with patch.object(mixed, "speech_ranges", return_value=[(0, s), (5 * s, 6 * s), (10 * s, 14 * s)]), \
+                 patch.object(mixed.subprocess, "run", side_effect=whisper), \
+                 patch.object(mixed, "translate_selected", side_effect=RuntimeError("Not logged in")):
+                result = mixed.transcribe_mixed(wav, root, root / "model", root / "vad", 2, "claude")
+            assert calls == [("auto", 3), ("ko", 1)]
+            assert [(s["text"], s["source_language"]) for s in result["transcription"]] == [
+                ("응.", "ko"), ("응.", "ko"), ("Hello there.", "en"),
+            ]
+            assert "Not logged in" in result["translation_error"]
 
     def test_translation_cache_uses_context_and_keeps_successful_batches(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(foreign, "CACHE_DIR", Path(tmp)), \

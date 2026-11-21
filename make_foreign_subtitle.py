@@ -464,7 +464,8 @@ def translate_batch(engine: str, batch: dict, context: list, title: str, cwd: st
     for attempt in range(1, 4):
         p = subprocess.run(cmd, input=stdin, capture_output=True, text=True, cwd=cwd, timeout=1800)
         if p.returncode != 0:  # 사용량 한도·로그인 만료 등 → 재시도해도 소용없음
-            raise RuntimeError(f"{engine} 실행 실패: {(p.stderr or p.stdout).strip()[-500:]}")
+            # stderr에 경고만 있고 실제 원인(예: Not logged in)은 stdout에 나오기도 한다
+            raise RuntimeError(f"{engine} 실행 실패: {' '.join((p.stderr + p.stdout).split())[-500:]}")
         obj = extract_json(p.stdout, set(batch))
         if obj:
             return obj

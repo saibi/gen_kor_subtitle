@@ -37,10 +37,14 @@ notify() {{ osascript -e 'on run argv' -e 'display notification (item 1 of argv)
 for f in "$@"; do
   name="${{f:t}}"
   echo "===== $(date) $f" >> {log}
+  start=$(($(wc -l < {log}) + 1))
   if {py} {script}{options} "$f" >> {log} 2>&1; then
     notify "$name" "자막 생성 완료"
   else
-    notify "$name (로그: ~/Library/Logs/make_subtitle.log)" "자막 생성 실패"
+    # 알림은 설정에 따라 안 보일 수 있어 실패는 경고창으로 띄운다
+    osascript -e 'on run argv' -e 'display alert (item 1 of argv) message (item 2 of argv) as critical' -e 'end run' "자막 생성 실패: $name" "$(tail -n +$start {log} | grep -aF '[오류]' | tail -2 | cut -d m -f 3-)
+
+로그: ~/Library/Logs/make_subtitle.log" >/dev/null
   fi
 done
 """

@@ -321,6 +321,8 @@ def generate_subtitles(wav_path, prefix, args, model_path, vad_path, work_dir, r
             raise OSError(f"준비된 자막 파일이 없습니다: {path.name}")
     for path, dest in outputs.items():
         path.replace(dest)
+    if transcript and transcript.get("translation_error"):
+        raise RuntimeError(f"외국어 대사를 원문 그대로 둔 자막을 저장했습니다. {transcript['translation_error']}")
     return count, recognition_seconds
 
 
