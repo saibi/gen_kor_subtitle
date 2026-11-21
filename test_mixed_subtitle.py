@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,9 +19,22 @@ import make_foreign_subtitle as foreign
 import make_subtitle as app
 import make_subtitle_linux as linux
 import mixed_subtitle as mixed
+import install_quick_action as quick_action
 
 
 class MixedTests(unittest.TestCase):
+    def test_finder_installs_mixed_mode_for_korean_movies(self):
+        for script, options in (
+            ("make_subtitle.py", ["--lang", "mixed"]),
+            ("make_foreign_subtitle.py", []),
+        ):
+            workflow = quick_action.document_wflow(script)
+            shell = workflow["actions"][0]["action"]["ActionParameters"]["COMMAND_STRING"]
+            invoke = next(line for line in shell.splitlines() if line.strip().startswith("if "))
+            assert shlex.split(invoke)[:4 + len(options)] == [
+                "if", sys.executable, str(quick_action.HERE / script), *options, "$f",
+            ]
+
     def test_mixed_cli_option_combinations(self):
         for entry in (app, linux):
             for flags in (["--lang", "mixed", "--no-vad"], ["--translator", "claude"]):
