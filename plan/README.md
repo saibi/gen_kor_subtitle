@@ -7,3 +7,4 @@
 | FKS | 외국영화 한국어 자막 생성기 (Foreign film Korean Subtitle) | 구현 완료, 리뷰 반영 완료 |
 | LNX | 구형 Intel MacBook Linux 자막 생성기 통합 | 구현 완료, 교차리뷰 반영 완료 |
 | MXS | 한국영화 혼합 언어 자막 및 싱크 개선 | 구현 완료, 교차리뷰 반영 완료, 영화 검증 일부 완료 |
+| LTR | 로컬 LLM 번역기 (Local TRanslator) | 계획 확정 (구현 전) |
