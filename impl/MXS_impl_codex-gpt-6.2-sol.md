@@ -1,6 +1,7 @@
 # [MXS] 구현 노트
 
 - 계획은 `plan/MXS_plan_codex-gpt-6.2-sol.md`를 참조한다.
+- 구현 커밋 `61fb656`
 
 ## 아키텍처
 
