@@ -110,7 +110,7 @@ def needs_translation(text: str, language: str) -> bool:
 
 
 def transcribe_mixed(wav_path, work_dir, model_path, vad_path, threads, translator, *, cpu_only=False):
-    engine = translator or os.environ.get("FKS_TRANSLATOR", "claude")
+    engine = translator or "local"
     if engine not in TRANSLATORS:
         raise ValueError(f"지원하지 않는 번역기입니다: {engine}")
     if vad_path is None:

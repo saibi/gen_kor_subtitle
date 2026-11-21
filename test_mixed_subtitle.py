@@ -209,8 +209,9 @@ class MixedTests(unittest.TestCase):
             # 1s Korean, 1s misdetected as zh, 4s real English
             with patch.object(mixed, "speech_ranges", return_value=[(0, s), (5 * s, 6 * s), (10 * s, 14 * s)]), \
                  patch.object(mixed.subprocess, "run", side_effect=whisper), \
-                 patch.object(mixed, "translate_selected", side_effect=RuntimeError("Not logged in")):
-                result = mixed.transcribe_mixed(wav, root, root / "model", root / "vad", 2, "claude")
+                 patch.object(mixed, "translate_selected", side_effect=RuntimeError("Not logged in")) as translate:
+                result = mixed.transcribe_mixed(wav, root, root / "model", root / "vad", 2, None)
+            assert translate.call_args.args[2] == "local"  # LTR-Q2: 혼합 모드 기본은 로컬 번역
             assert calls == [("auto", 3), ("ko", 1)]
             assert [(s["text"], s["source_language"]) for s in result["transcription"]] == [
                 ("응.", "ko"), ("응.", "ko"), ("Hello there.", "en"),

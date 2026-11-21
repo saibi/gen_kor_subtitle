@@ -7,10 +7,11 @@ gen_kor_subtitle (make_foreign_subtitle.py) — plan/FKS_plan_claude-opus-5-5.md
   2. online   : opensubtitles.org 공개 검색 — 한국어 자막, 없으면 영어 자막을 받아 번역
   3. whisper  : 원어 음성인식 후 번역
 
-번역은 에이전트 CLI(claude / codex / agy)를 비대화형으로 실행합니다.
+번역은 에이전트 CLI(claude / codex / agy)를 비대화형으로 실행하거나, 로컬 llama.cpp 서버(local)를 씁니다.
 """
 
 import argparse
+import contextlib
 import functools
 import hashlib
 import html
@@ -19,9 +20,11 @@ import json
 import os
 import re
 import shutil
+import socket
 import struct
 import subprocess
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -74,7 +77,101 @@ TRANSLATORS = {
     # agy는 도구를 끄는 옵션이 없다 → plan 모드(파일 수정·명령 실행 안 함) + sandbox로 제한.
     # plan 모드는 slash 명령 확장이 켜져 있어야 동작하는데, 프롬프트가 "You are"로 시작해 확장되지 않는다
     "agy": lambda p: (["agy", "--sandbox", "--mode", "plan", "-p", p], None),
+    # 로컬 llama-server에 HTTP로 요청한다 (translate_batch의 local 분기)
+    "local": None,
 }
+
+LOCAL_MODEL = {
+    "filename": "gemma-4-E4B-it-Q4_0.gguf",
+    "url": "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf",
+}
+
+
+def translator_binary(engine: str) -> str:
+    return "llama-server" if engine == "local" else engine
+
+
+def cache_engine(engine: str) -> str:
+    """캐시 키용 엔진 이름. 로컬은 모델이 바뀌면 이전 번역을 재사용하지 않는다."""
+    if engine != "local":
+        return engine
+    return f"local:{Path(os.environ.get('LTR_MODEL') or LOCAL_MODEL['filename']).name}"
+
+
+def local_model_path() -> Path:
+    if custom := os.environ.get("LTR_MODEL"):
+        path = Path(custom).expanduser()
+        if not path.is_file():
+            raise RuntimeError(f"LTR_MODEL 모델 파일이 없습니다: {path}")
+        return path
+    try:
+        return ms.ensure_file_downloaded(ms.resolve_model_dir(None) / LOCAL_MODEL["filename"],
+                                         LOCAL_MODEL["url"], "로컬 번역 모델(gemma-4-E4B-it)")
+    except SystemExit as exc:  # 다운로드 실패가 앞선 음성 인식 결과까지 버리지 않게
+        raise RuntimeError("로컬 번역 모델을 내려받지 못했습니다.") from exc
+
+
+@contextlib.contextmanager
+def local_server():
+    """llama-server를 127.0.0.1의 빈 포트로 띄우고 주소를 준다. 끝나면 반드시 종료한다."""
+    if not shutil.which("llama-server"):
+        raise RuntimeError("llama-server가 없습니다. macOS: brew install llama.cpp")
+    model = local_model_path()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    url = f"http://127.0.0.1:{port}"
+    log(f"로컬 번역 서버 시작 중 ({model.name})")
+    with tempfile.TemporaryFile() as output:
+        proc = subprocess.Popen(
+            ["llama-server", "-m", str(model), "--host", "127.0.0.1", "--port", str(port),
+             "-c", "8192", "-rea", "off"],
+            stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+        )
+        try:
+            deadline = time.monotonic() + 120
+            while True:
+                if proc.poll() is not None:
+                    output.seek(0)
+                    tail = " ".join(output.read().decode("utf-8", "replace").split())[-500:]
+                    raise RuntimeError(f"llama-server 실행 실패: {tail}")
+                try:
+                    with urllib.request.urlopen(url + "/health", timeout=2) as res:
+                        if res.status == 200:
+                            break
+                except OSError:  # 로딩 중에는 503 또는 연결 거부
+                    pass
+                if time.monotonic() > deadline:
+                    raise RuntimeError("llama-server가 120초 안에 준비되지 않았습니다.")
+                time.sleep(0.5)
+            yield url
+        finally:
+            proc.terminate()
+            try:
+                proc.wait(10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+
+def local_complete(server: str, prompt: str, keys: list[str]) -> str:
+    # llama.cpp는 스키마의 키 순서대로 생성한다. 입력 순서와 다르면 모델이 번역을 엉뚱한 키에 쓴다.
+    schema = {"type": "object", "properties": {k: {"type": "string", "minLength": 1} for k in keys},
+              "required": keys, "additionalProperties": False}
+    body = {"messages": [{"role": "user", "content": prompt}], "temperature": 0,
+            "response_format": {"type": "json_schema", "json_schema": {"schema": schema}}}
+    req = urllib.request.Request(server + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=1800) as res:
+            data = json.loads(res.read())
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"local 번역 요청 실패: {exc}") from exc
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        return ""
+    return content if isinstance(content, str) else ""
 
 TRANSLATE_PROMPT = """You are a professional Korean film subtitle translator. Do not use any tools.
 Translate every subtitle line in INPUT into natural, colloquial Korean subtitles.
@@ -454,19 +551,23 @@ MIXED_TRANSLATE_PROMPT = MIXED_TRANSLATE_PROMPT.replace("Title: {title}\n", "")
 
 
 def translate_batch(engine: str, batch: dict, context: list, title: str, cwd: str,
-                    *, template: str = TRANSLATE_PROMPT) -> dict:
+                    *, template: str = TRANSLATE_PROMPT, server: str | None = None) -> dict:
     prompt = template.format(
         title=title,
         context=json.dumps(context, ensure_ascii=False) if context else "(none)",
         batch=json.dumps(batch, ensure_ascii=False, indent=0),
     )
-    cmd, stdin = TRANSLATORS[engine](prompt)
     for attempt in range(1, 4):
-        p = subprocess.run(cmd, input=stdin, capture_output=True, text=True, cwd=cwd, timeout=1800)
-        if p.returncode != 0:  # 사용량 한도·로그인 만료 등 → 재시도해도 소용없음
-            # stderr에 경고만 있고 실제 원인(예: Not logged in)은 stdout에 나오기도 한다
-            raise RuntimeError(f"{engine} 실행 실패: {' '.join((p.stderr + p.stdout).split())[-500:]}")
-        obj = extract_json(p.stdout, set(batch))
+        if engine == "local":
+            text = local_complete(server, prompt, list(batch))
+        else:
+            cmd, stdin = TRANSLATORS[engine](prompt)
+            p = subprocess.run(cmd, input=stdin, capture_output=True, text=True, cwd=cwd, timeout=1800)
+            if p.returncode != 0:  # 사용량 한도·로그인 만료 등 → 재시도해도 소용없음
+                # stderr에 경고만 있고 실제 원인(예: Not logged in)은 stdout에 나오기도 한다
+                raise RuntimeError(f"{engine} 실행 실패: {' '.join((p.stderr + p.stdout).split())[-500:]}")
+            text = p.stdout
+        obj = extract_json(text, set(batch))
         if obj:
             return obj
         warn(f"  번역 응답 형식이 맞지 않아 다시 요청합니다 ({attempt}/3)")
@@ -476,7 +577,8 @@ def translate_batch(engine: str, batch: dict, context: list, title: str, cwd: st
 def translate_selected(lines: list[str], targets: list[int], engine: str) -> dict[int, str]:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     translations = {}
-    with tempfile.TemporaryDirectory() as cwd:
+    server = None
+    with tempfile.TemporaryDirectory() as cwd, contextlib.ExitStack() as stack:
         for offset in range(0, len(targets), TRANSLATE_BATCH):
             indices = targets[offset : offset + TRANSLATE_BATCH]
             batch = {str(i): lines[i] for i in indices}
@@ -485,7 +587,7 @@ def translate_selected(lines: list[str], targets: list[int], engine: str) -> dic
                                                min(len(lines), i + TRANSLATE_CONTEXT + 1))
                                 if str(j) not in batch})
             context = [{"id": str(i), "src": lines[i]} for i in neighbors]
-            key = json.dumps([MIXED_TRANSLATE_PROMPT, engine, batch, context], ensure_ascii=False)
+            key = json.dumps([MIXED_TRANSLATE_PROMPT, cache_engine(engine), batch, context], ensure_ascii=False)
             digest = hashlib.sha256(key.encode()).hexdigest()
             cache = CACHE_DIR / f"mixed-{digest}.json"
             try:
@@ -493,8 +595,11 @@ def translate_selected(lines: list[str], targets: list[int], engine: str) -> dic
             except (FileNotFoundError, UnicodeError):
                 result = None
             if result is None:
+                if engine == "local" and server is None:  # 캐시로 끝나면 모델 다운로드·서버 실행을 하지 않는다
+                    server = stack.enter_context(local_server())
                 log(f"혼합 언어 번역 중 ({engine}) ({offset + 1}-{offset + len(indices)}/{len(targets)}줄)")
-                result = translate_batch(engine, batch, context, "", cwd, template=MIXED_TRANSLATE_PROMPT)
+                result = translate_batch(engine, batch, context, "", cwd, template=MIXED_TRANSLATE_PROMPT,
+                                         server=server)
                 with tempfile.TemporaryDirectory(dir=CACHE_DIR) as staging:
                     temp = Path(staging) / "translation.json"
                     temp.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
@@ -506,7 +611,7 @@ def translate_selected(lines: list[str], targets: list[int], engine: str) -> dic
 def translate(cues: list[Cue], engine: str, title: str) -> list[Cue]:
     keys = [str(i) for i in range(1, len(cues) + 1)]
     source = {k: t for k, (_, _, t) in zip(keys, cues)}
-    digest = hashlib.sha256(json.dumps([engine, source], ensure_ascii=False).encode()).hexdigest()[:16]
+    digest = hashlib.sha256(json.dumps([cache_engine(engine), source], ensure_ascii=False).encode()).hexdigest()[:16]
     cache = CACHE_DIR / f"{digest}.json"
     try:
         done = json.loads(cache.read_text())
@@ -521,14 +626,17 @@ def translate(cues: list[Cue], engine: str, title: str) -> list[Cue]:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     # ponytail: 문맥 유지를 위해 묶음을 순서대로 번역. 너무 느리면 문맥 없이 병렬 실행
-    with tempfile.TemporaryDirectory() as cwd:
+    server = None
+    with tempfile.TemporaryDirectory() as cwd, contextlib.ExitStack() as stack:
         for b in range(0, len(keys), TRANSLATE_BATCH):
             chunk = keys[b : b + TRANSLATE_BATCH]
             if all(k in done for k in chunk):
                 continue
+            if engine == "local" and server is None:
+                server = stack.enter_context(local_server())
             log(f"번역 중 ({engine}): {b + 1}-{b + len(chunk)} / {len(keys)}줄")
             context = [{"src": source[k], "ko": done[k]} for k in keys[max(0, b - TRANSLATE_CONTEXT) : b] if k in done]
-            done.update(translate_batch(engine, {k: source[k] for k in chunk}, context, title, cwd))
+            done.update(translate_batch(engine, {k: source[k] for k in chunk}, context, title, cwd, server=server))
             tmp_cache = cache.with_suffix(".tmp")
             tmp_cache.write_text(json.dumps(done, ensure_ascii=False))
             os.replace(tmp_cache, cache)  # 중간에 끊겨도 캐시가 깨지지 않게 원자적으로 교체
@@ -561,7 +669,7 @@ def dry_run(video: Path, args) -> None:
                 log(f"  opensubtitles {lang}: 해시 일치 {sum(h for _, h in c)}건, 제목 검색 {sum(not h for _, h in c)}건")
             except Exception as e:
                 warn(f"  opensubtitles {lang} 검색 실패: {e}")
-    log(f"  번역기 {args.translator}: {'사용 가능' if shutil.which(args.translator) else '설치 안 됨'}")
+    log(f"  번역기 {args.translator}: {'사용 가능' if shutil.which(translator_binary(args.translator)) else '설치 안 됨'}")
 
 
 def process_video(video: Path, args) -> bool:
@@ -639,7 +747,7 @@ def parse_args() -> argparse.Namespace:
         "--translator",
         default=os.environ.get("FKS_TRANSLATOR", "claude"),
         choices=list(TRANSLATORS),
-        help="번역에 사용할 에이전트 CLI (기본값: 환경변수 FKS_TRANSLATOR 또는 claude)",
+        help="번역 엔진: 에이전트 CLI 또는 local(로컬 llama.cpp) (기본값: 환경변수 FKS_TRANSLATOR 또는 claude)",
     )
     parser.add_argument("--source-lang", default="auto", help="음성인식(whisper) 원어 코드 (기본값: auto)")
     parser.add_argument("--keep-source", action="store_true", help="원어 자막을 <이름>.<언어>.srt로 보관")
@@ -658,7 +766,7 @@ def main() -> None:
     if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
         err("ffmpeg가 설치되어 있지 않습니다. 설치 명령어: brew install ffmpeg")
         raise SystemExit(1)
-    args.can_translate = bool(shutil.which(args.translator))
+    args.can_translate = bool(shutil.which(translator_binary(args.translator)))
     if not args.dry_run and not args.can_translate:
         warn(f"번역기 '{args.translator}'를 찾을 수 없습니다. 한국어 자막만 찾아봅니다.")
     videos = [Path(v).expanduser().resolve() for v in args.videos]

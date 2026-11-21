@@ -69,15 +69,20 @@ Silero로 음성 구간을 나누고 각 구간의 언어를 자동 감지합니
 외국어 대사는 번역해서 같은 자막에 넣습니다.
 
 ```bash
-./make_subtitle.py "movie.mkv" --lang mixed --translator claude
+./make_subtitle.py "movie.mkv" --lang mixed                      # 로컬 번역 (기본)
+./make_subtitle.py "movie.mkv" --lang mixed --translator claude  # 에이전트 CLI로 번역
 ```
 
-번역기를 생략하면 `FKS_TRANSLATOR` 값 또는 `claude`를 사용합니다. 영어·일본어 등 번역할
-대사와 주변 자막 텍스트가 선택한 서비스에 전달되며 오디오 처리는 로컬에서 이루어집니다.
+번역기를 생략하면 `local`을 사용합니다. Homebrew `llama.cpp`의 `llama-server`(없으면 자동 설치)와
+`gemma-4-E4B-it` 모델(4.6GB, 처음 번역할 때 `~/.cache/whisper-cpp/models/`에 자동 다운로드)로
+로그인·인터넷 없이 번역합니다. 다른 GGUF 모델은 `LTR_MODEL=/경로/model.gguf`로 지정합니다.
+`claude`/`codex`/`agy`를 고르면 번역할 대사와 주변 자막 텍스트가 해당 서비스에 전달됩니다.
+번역에 실패하면 외국어 대사를 원문 그대로 둔 자막을 저장하고 오류로 끝납니다.
 번역 결과는 `~/.cache/gen_kor_subtitle/translations/`에 보관해 재실행 시 사용합니다.
 혼합 모드를 중단하면 재실행 시 음성 인식부터 다시 진행합니다.
-혼합 모드는 Silero VAD와 다국어 Whisper 모델을 사용하고, 구간별 인식 때문에 기본 모드보다
-오래 걸릴 수 있습니다. 매우 짧은 대사나 동시에 나오는 대사는 언어가 잘못 감지될 수 있습니다.
+혼합 모드는 Silero VAD와 다국어 Whisper 모델을 사용합니다. 가까운 대사를 최대 25초씩 묶어 인식하고,
+3초보다 짧은 구간이 외국어로 감지되면 한국어로 다시 인식합니다. 그래서 아주 짧은 외국어 대사는
+한글로 적힐 수 있습니다.
 
 두 모드 모두 오디오 추출 시 영상의 시간축을 보존하고, 인식한 대사 시작보다 자막을
 0.1초 먼저 표시합니다. 종료 시각에는 이 0.1초를 적용하지 않습니다.
@@ -115,7 +120,7 @@ Silero로 음성 구간을 나누고 각 구간의 언어를 자동 감지합니
 | `videos` | (필수) | 자막을 생성할 원본 영상 파일 경로 (여러 개 지정 가능) |
 | `-o`, `--output-dir` | 원본 영상 폴더 | 자막 및 작업 파일을 저장할 디렉토리 경로 |
 | `-l`, `--lang` | `ko` | 음성 언어 코드 (`ko`, `en`, `ja`, `auto` 등) 또는 구간별 인식·번역 (`mixed`) |
-| `--translator` | `FKS_TRANSLATOR` 또는 `claude` | 혼합 언어 번역 CLI (`claude`, `codex`, `agy`) |
+| `--translator` | `local` | 혼합 언어 번역기 (`local`, `claude`, `codex`, `agy`) |
 | `-m`, `--model` | `large-v3-turbo` | Whisper 모델 선택 (`large-v3-turbo`, `large-v3`, `medium`, `small`, `base`) |
 | `--model-path` | `None` | 직접 다운로드한 커스텀 GGML `.bin` 모델 경로 지정 |
 | `--model-dir` | `~/.cache/whisper-cpp/models` | 모델 파일 다운로드 및 캐시 디렉토리 |
@@ -140,6 +145,7 @@ Silero로 음성 구간을 나누고 각 구간의 언어를 자동 감지합니
 ./make_foreign_subtitle.py movie.mkv                          # embedded → online → whisper
 ./make_foreign_subtitle.py movie.mkv --method embedded,online  # 지정한 방법만 (순서대로)
 ./make_foreign_subtitle.py movie.mkv --translator codex        # 번역 엔진 선택
+./make_foreign_subtitle.py movie.mkv --translator local        # 로컬 llama.cpp로 번역
 ./make_foreign_subtitle.py movie.mkv --keep-source             # 원어 자막도 <이름>.<언어>.srt로 보관
 ./make_foreign_subtitle.py movie.mkv --dry-run                 # 내장 트랙/온라인 검색 결과만 점검
 ```
@@ -148,7 +154,7 @@ Silero로 음성 구간을 나누고 각 구간의 언어를 자동 감지합니
 | :--- | :--- | :--- |
 | `-o`, `--output-dir` | 원본 영상 폴더 | 자막 저장 폴더 |
 | `--method` | `embedded,online,whisper` | 시도할 방법과 순서 |
-| `--translator` | `FKS_TRANSLATOR` 환경변수 또는 `claude` | 번역 엔진: `claude`, `codex`, `agy` |
+| `--translator` | `FKS_TRANSLATOR` 환경변수 또는 `claude` | 번역 엔진: `claude`, `codex`, `agy`, `local` |
 | `--source-lang` | `auto` | whisper 음성인식 원어 코드 |
 | `--keep-source` | `False` | 원어 자막 보관 |
 | `--force` | `False` | 한국어 자막(`.ko.srt`, `.ko.smi`, `.smi`)이 이미 있어도 다시 생성 |

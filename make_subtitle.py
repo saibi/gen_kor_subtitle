@@ -390,7 +390,7 @@ def process_video(video_path: Path, args: argparse.Namespace, model_path: Path, 
 def add_translator_option(parser):
     from make_foreign_subtitle import TRANSLATORS
     parser.add_argument("--translator", choices=TRANSLATORS,
-                        help="혼합 언어 온라인 번역기 (기본값: FKS_TRANSLATOR 또는 claude)")
+                        help="혼합 언어의 외국어 대사 번역기 (기본값: local, 로컬 llama.cpp)")
 
 
 def validate_subtitle_args(parser, args):
@@ -502,6 +502,12 @@ def main() -> None:
     if args.lang == "mixed" and not shutil.which("whisper-vad-speech-segments"):
         err("혼합 언어 감지 도구가 없습니다. Homebrew의 whisper.cpp를 확인하세요.")
         sys.exit(1)
+    if args.lang == "mixed" and (args.translator or "local") == "local" and not shutil.which("llama-server"):
+        if shutil.which("brew"):
+            log("로컬 번역용 llama.cpp 설치 중 (brew install llama.cpp)")
+            subprocess.run(["brew", "install", "llama.cpp"], check=False)
+        if not shutil.which("llama-server"):
+            warn("llama-server가 없어 외국어 대사는 원문 그대로 남습니다. 설치: brew install llama.cpp")
     model_dir = resolve_model_dir(args.model_dir)
 
     if args.model_path:

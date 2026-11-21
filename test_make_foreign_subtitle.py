@@ -96,7 +96,7 @@ with tempfile.TemporaryDirectory() as d:
     f.CACHE_DIR = d / "cache"
     cues = [(i * 1000, i * 1000 + 500, f"line {i}") for i in range(101)]
     calls = []
-    f.translate_batch = lambda engine, batch, ctx, title, cwd: calls.append(len(batch)) or {k: f"번역 {k}" for k in batch}
+    f.translate_batch = lambda engine, batch, ctx, title, cwd, **kw: calls.append(len(batch)) or {k: f"번역 {k}" for k in batch}
     f.translate(cues, "claude", "t")
     cache = next(f.CACHE_DIR.glob("*.json"))
     cache.write_text('{"1": "번역')  # 쓰다가 끊긴 캐시

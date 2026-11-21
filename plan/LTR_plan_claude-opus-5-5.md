@@ -22,14 +22,14 @@
 - `LTR_MODEL` 환경변수로 다른 GGUF 경로를 직접 지정할 수 있다(파일이 없으면 오류).
 
 ### 2) 서버 실행과 종료
-- 명령: `llama-server -m <gguf> --host 127.0.0.1 --port <빈 포트> -c 8192 -rea off --log-disable`. 인자 배열로 실행하고 stdout·stderr는 작업 폴더의 로그 파일로 보낸다(실패 시 마지막 몇 줄을 오류 메시지에 넣는다).
+- 명령: `llama-server -m <gguf> --host 127.0.0.1 --port <빈 포트> -c 8192 -rea off`. 인자 배열로 실행하고 stdout·stderr는 임시 파일로 보낸다(실패 시 마지막 500자를 오류 메시지에 넣는다). 구현 시 `--log-disable`은 실패 원인이 사라져 뺐다.
 - 빈 포트는 `socket`으로 `127.0.0.1:0`에 bind해서 얻는다. `GET /health`가 `ok`를 줄 때까지 최대 120초 기다리고, 그 사이 프로세스가 끝나면 즉시 실패한다.
 - 번역 호출(`translate_selected`, FKS의 `translate`) 단위로 서버를 **한 번만** 띄우고 `finally`에서 terminate → 10초 후 kill로 반드시 정리한다. Ctrl+C로 중단해도 서버가 남지 않아야 한다.
 - `-rea off`: Gemma 4는 생각(reasoning) 출력을 지원한다. 끄지 않으면 응답이 늦고 내용 필드가 비어 있을 수 있다.
 
 ### 3) 번역 요청
 - `urllib.request`로 `POST /v1/chat/completions`에 `{"messages": [{"role": "user", "content": <기존 프롬프트>}], "temperature": 0, "response_format": {"type": "json_schema", "json_schema": {"schema": ...}}}`를 보낸다.
-- 스키마는 배치 키를 모두 `required`로 두고, 각 값은 `minLength: 1`인 문자열, `additionalProperties: false`로 둔다. 서버가 형식을 강제하므로 응답은 바로 JSON으로 읽는다. 그래도 기존 `extract_json()`으로 키·빈 값을 다시 검증한다.
+- 스키마는 배치 키를 **입력 순서 그대로** `properties`·`required`에 둔다(llama.cpp가 이 순서로 생성하므로, 순서가 섞이면 번역이 다른 키에 들어간다. 구현 중 실제 영화에서 확인). 모든 키를 `required`로 두고, 각 값은 `minLength: 1`인 문자열, `additionalProperties: false`로 둔다. 서버가 형식을 강제하므로 응답은 바로 JSON으로 읽는다. 그래도 기존 `extract_json()`으로 키·빈 값을 다시 검증한다.
 - 프롬프트는 기존 `TRANSLATE_PROMPT`/`MIXED_TRANSLATE_PROMPT`를 그대로 사용한다. 요청 타임아웃은 기존과 같이 1800초다. 검증 실패 시 기존처럼 3번까지 재시도한다.
 - `llama-cli`는 쓰지 않는다. 대화 모드에서 입력 프롬프트(INPUT JSON 포함)를 출력에 다시 찍기 때문에, 번역되지 않은 INPUT을 응답으로 잘못 읽을 위험이 있다(전제 검증 참고).
 
