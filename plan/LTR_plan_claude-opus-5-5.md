@@ -22,7 +22,7 @@
 - `LTR_MODEL` 환경변수로 다른 GGUF 경로를 직접 지정할 수 있다(파일이 없으면 오류).
 
 ### 2) 서버 실행과 종료
-- 명령: `llama-server -m <gguf> --host 127.0.0.1 --port <빈 포트> -c 8192 -rea off`. 인자 배열로 실행하고 stdout·stderr는 임시 파일로 보낸다(실패 시 마지막 500자를 오류 메시지에 넣는다). 구현 시 `--log-disable`은 실패 원인이 사라져 뺐다.
+- 명령: `llama-server -m <gguf> --host 127.0.0.1 --port <빈 포트> -c 16384 -rea off`(리뷰 LTR-R6로 8192에서 상향, 로컬 묶음은 25줄). 인자 배열로 실행하고 stdout·stderr는 임시 파일로 보낸다(실패 시 마지막 500자를 오류 메시지에 넣는다). 구현 시 `--log-disable`은 실패 원인이 사라져 뺐다.
 - 빈 포트는 `socket`으로 `127.0.0.1:0`에 bind해서 얻는다. `GET /health`가 `ok`를 줄 때까지 최대 120초 기다리고, 그 사이 프로세스가 끝나면 즉시 실패한다.
 - 번역 호출(`translate_selected`, FKS의 `translate`) 단위로 서버를 **한 번만** 띄우고 `finally`에서 terminate → 10초 후 kill로 반드시 정리한다. Ctrl+C로 중단해도 서버가 남지 않아야 한다.
 - `-rea off`: Gemma 4는 생각(reasoning) 출력을 지원한다. 끄지 않으면 응답이 늦고 내용 필드가 비어 있을 수 있다.

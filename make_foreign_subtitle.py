@@ -15,6 +15,7 @@ import contextlib
 import functools
 import hashlib
 import html
+import http.client
 import io
 import json
 import os
@@ -45,6 +46,8 @@ UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/
 OS_SEARCH = "https://www.opensubtitles.org/en/search/sublanguageid-{lang}/{cond}/simplexml"
 MAX_DOWNLOADS_PER_LANG = 3
 TRANSLATE_BATCH = 100
+# 로컬 모델은 입력 한도(-c 16384)가 작아 혼합 모드 문맥(대상마다 앞뒤 5줄)까지 넣으려면 묶음을 줄인다 (LTR-R6)
+LOCAL_BATCH = 25
 TRANSLATE_CONTEXT = 5
 CACHE_DIR = Path.home() / ".cache" / "gen_kor_subtitle" / "translations"
 
@@ -87,6 +90,10 @@ LOCAL_MODEL = {
 }
 
 
+# 로컬 서버 요청은 환경 프록시(http_proxy)를 타지 않게 한다 (LTR-R1)
+LOCAL_HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def translator_binary(engine: str) -> str:
     return "llama-server" if engine == "local" else engine
 
@@ -95,7 +102,14 @@ def cache_engine(engine: str) -> str:
     """캐시 키용 엔진 이름. 로컬은 모델이 바뀌면 이전 번역을 재사용하지 않는다."""
     if engine != "local":
         return engine
-    return f"local:{Path(os.environ.get('LTR_MODEL') or LOCAL_MODEL['filename']).name}"
+    if custom := os.environ.get("LTR_MODEL"):
+        path = Path(custom).expanduser().resolve()
+        try:  # 같은 이름의 다른 모델이나 같은 경로에서 교체한 모델을 구분 (LTR-R5)
+            info = path.stat()
+            return f"local:{path}:{info.st_size}:{info.st_mtime_ns}"
+        except OSError:
+            return f"local:{path}"
+    return f"local:{LOCAL_MODEL['filename']}"
 
 
 def local_model_path() -> Path:
@@ -115,7 +129,8 @@ def local_model_path() -> Path:
 def local_server():
     """llama-server를 127.0.0.1의 빈 포트로 띄우고 주소를 준다. 끝나면 반드시 종료한다."""
     if not shutil.which("llama-server"):
-        raise RuntimeError("llama-server가 없습니다. macOS: brew install llama.cpp")
+        raise RuntimeError("llama-server가 없습니다. macOS: brew install llama.cpp, "
+                           "Linux: llama.cpp를 빌드해 llama-server를 PATH에 넣으세요.")
     model = local_model_path()
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
@@ -125,7 +140,7 @@ def local_server():
     with tempfile.TemporaryFile() as output:
         proc = subprocess.Popen(
             ["llama-server", "-m", str(model), "--host", "127.0.0.1", "--port", str(port),
-             "-c", "8192", "-rea", "off"],
+             "-c", "16384", "-rea", "off"],
             stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
         )
         try:
@@ -136,11 +151,12 @@ def local_server():
                     tail = " ".join(output.read().decode("utf-8", "replace").split())[-500:]
                     raise RuntimeError(f"llama-server 실행 실패: {tail}")
                 try:
-                    with urllib.request.urlopen(url + "/health", timeout=2) as res:
-                        if res.status == 200:
+                    with LOCAL_HTTP.open(url + "/health", timeout=2) as res:
+                        # 다른 프로세스가 포트를 가로챈 경우를 거르려고 본문과 자식 생존을 함께 본다 (LTR-R3)
+                        if json.loads(res.read()).get("status") == "ok" and proc.poll() is None:
                             break
-                except OSError:  # 로딩 중에는 503 또는 연결 거부
-                    pass
+                except (OSError, ValueError, AttributeError, http.client.HTTPException):
+                    pass  # 로딩 중에는 503 또는 연결 거부
                 if time.monotonic() > deadline:
                     raise RuntimeError("llama-server가 120초 안에 준비되지 않았습니다.")
                 time.sleep(0.5)
@@ -163,9 +179,9 @@ def local_complete(server: str, prompt: str, keys: list[str]) -> str:
     req = urllib.request.Request(server + "/v1/chat/completions", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=1800) as res:
+        with LOCAL_HTTP.open(req, timeout=1800) as res:
             data = json.loads(res.read())
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, http.client.HTTPException) as exc:  # 응답 도중 끊김 포함 (LTR-R2)
         raise RuntimeError(f"local 번역 요청 실패: {exc}") from exc
     try:
         content = data["choices"][0]["message"]["content"]
@@ -534,7 +550,9 @@ def extract_json(text: str, keys: set[str]) -> dict | None:
             obj, _ = dec.raw_decode(text, m.start())
         except ValueError:
             continue
-        if isinstance(obj, dict) and set(obj) == keys and all(isinstance(v, str) and clean_text(v) for v in obj.values()):
+        # 짝 없는 서로게이트는 UTF-8 캐시 저장에서 터지므로 형식 오류로 보고 재시도한다 (LTR-R7)
+        if isinstance(obj, dict) and set(obj) == keys and all(
+                isinstance(v, str) and clean_text(v) and not re.search(r"[\ud800-\udfff]", v) for v in obj.values()):
             return obj
     return None
 
@@ -578,9 +596,10 @@ def translate_selected(lines: list[str], targets: list[int], engine: str) -> dic
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     translations = {}
     server = None
+    size = LOCAL_BATCH if engine == "local" else TRANSLATE_BATCH
     with tempfile.TemporaryDirectory() as cwd, contextlib.ExitStack() as stack:
-        for offset in range(0, len(targets), TRANSLATE_BATCH):
-            indices = targets[offset : offset + TRANSLATE_BATCH]
+        for offset in range(0, len(targets), size):
+            indices = targets[offset : offset + size]
             batch = {str(i): lines[i] for i in indices}
             neighbors = sorted({j for i in indices
                                 for j in range(max(0, i - TRANSLATE_CONTEXT),
@@ -627,9 +646,10 @@ def translate(cues: list[Cue], engine: str, title: str) -> list[Cue]:
 
     # ponytail: 문맥 유지를 위해 묶음을 순서대로 번역. 너무 느리면 문맥 없이 병렬 실행
     server = None
+    size = LOCAL_BATCH if engine == "local" else TRANSLATE_BATCH
     with tempfile.TemporaryDirectory() as cwd, contextlib.ExitStack() as stack:
-        for b in range(0, len(keys), TRANSLATE_BATCH):
-            chunk = keys[b : b + TRANSLATE_BATCH]
+        for b in range(0, len(keys), size):
+            chunk = keys[b : b + size]
             if all(k in done for k in chunk):
                 continue
             if engine == "local" and server is None:
@@ -768,7 +788,7 @@ def main() -> None:
         raise SystemExit(1)
     args.can_translate = bool(shutil.which(translator_binary(args.translator)))
     if not args.dry_run and not args.can_translate:
-        warn(f"번역기 '{args.translator}'를 찾을 수 없습니다. 한국어 자막만 찾아봅니다.")
+        warn(f"번역기 '{args.translator}'({translator_binary(args.translator)})를 찾을 수 없습니다. 한국어 자막만 찾아봅니다.")
     videos = [Path(v).expanduser().resolve() for v in args.videos]
     if args.dry_run:
         for v in videos:
