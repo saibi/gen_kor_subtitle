@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import wave
+from functools import partial
 from pathlib import Path
 
 from make_subtitle import (
@@ -26,6 +27,11 @@ from make_subtitle import (
     resolve_model_dir as _resolve_model_dir,
     ensure_file_downloaded as _download_model,
     postprocess_and_convert,
+    extract_audio,
+    run_whisper as _run_whisper,
+    generate_subtitles,
+    add_translator_option,
+    validate_subtitle_args,
 )
 
 # 기존 모델 목록은 공유하되 Linux 전용 양자화 선택지는 원본을 변경하지 않고 추가합니다.
@@ -92,81 +98,7 @@ def ensure_dependencies() -> None:
         sys.exit(1)
 
 
-def extract_audio(video_path: Path, wav_path: Path, overwrite: bool = False, start: float = 0, duration: float | None = None) -> None:
-    """영상 파일에서 16kHz 모노 PCM WAV 오디오 트랙을 추출합니다."""
-    if wav_path.exists() and not overwrite and wav_path.stat().st_size > 44:
-        log(f"기존 추출된 오디오 파일을 재사용합니다: {wav_path}")
-        return
-
-    log(f"오디오 트랙 추출 중: {video_path.name} -> {wav_path.name}")
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(video_path),
-        "-vn",
-        "-acodec",
-        "pcm_s16le",
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        "-loglevel",
-        "warning",
-        "-stats",
-        str(wav_path),
-    ]
-    if start:
-        cmd[2:2] = ["-ss", str(start)]
-    if duration is not None:
-        cmd[-1:-1] = ["-t", str(duration)]
-    subprocess.run(cmd, check=True)
-    log("오디오 추출 완료.")
-
-
-def run_whisper(
-    wav_path: Path,
-    output_prefix: Path,
-    model_path: Path,
-    vad_model_path: Path | None,
-    lang: str,
-    threads: int,
-    extra_formats: list[str],
-) -> Path:
-    """whisper-cli를 실행하여 음성 인식을 수행하고 SRT 파일을 생성합니다."""
-    log(f"음성 인식(Whisper) 실행 중... (언어: {lang}, 모델: {model_path.name}, 스레드: {threads})")
-    cmd = [
-        "whisper-cli",
-        "-m",
-        str(model_path),
-        "-f",
-        str(wav_path),
-        "-l",
-        lang,
-        "-sns",
-        "-ng",
-        "-t",
-        str(threads),
-        "-osrt",
-        "-of",
-        str(output_prefix),
-    ]
-
-    if vad_model_path and vad_model_path.exists():
-        cmd.extend(["--vad", "-vm", str(vad_model_path)])
-
-    if "vtt" in extra_formats:
-        cmd.append("-ovtt")
-    if "json" in extra_formats:
-        cmd.append("-oj")
-    if "txt" in extra_formats:
-        cmd.append("-otxt")
-
-    subprocess.run(cmd, check=True)
-    srt_path = Path(f"{output_prefix}.srt")
-    if not srt_path.exists():
-        raise RuntimeError(f"SRT 파일이 생성되지 않았습니다: {srt_path}")
-    return srt_path
+run_whisper = partial(_run_whisper, cpu_only=True)
 
 
 def process_video(video_path: Path, args: argparse.Namespace, model_path: Path, vad_path: Path | None) -> None:
@@ -184,8 +116,6 @@ def process_video(video_path: Path, args: argparse.Namespace, model_path: Path, 
     # 독립된 작업 폴더를 사용하여 원본 WAV나 이전 작업 파일을 삭제하지 않습니다.
     work_dir = tempfile.TemporaryDirectory(prefix="subtitle-", dir=out_dir)
     wav_path = Path(work_dir.name) / "audio.wav"
-    srt_path = out_dir / f"{stem}.srt"
-    smi_path = out_dir / f"{stem}.smi" if "smi" in args.formats else None
 
     log(f"=== 작업 시작: {video_path.name} ===")
     log(f"출력 경로: {out_dir}")
@@ -197,34 +127,13 @@ def process_video(video_path: Path, args: argparse.Namespace, model_path: Path, 
             audio_seconds = audio_file.getnframes() / audio_file.getframerate()
         if audio_seconds <= 0:
             raise ValueError("추출된 오디오가 비어 있습니다. --start 또는 영상 파일을 확인하세요.")
-        recognition_started = time.monotonic()
-        run_whisper(
-            wav_path=wav_path,
-            output_prefix=output_prefix,
-            model_path=model_path,
-            vad_model_path=vad_path,
-            lang=args.lang,
-            threads=args.threads,
-            extra_formats=args.formats,
+        count, recognition_seconds = generate_subtitles(
+            wav_path, output_prefix, args, model_path, vad_path, Path(work_dir.name),
+            run_whisper, cpu_only=True,
         )
-        recognition_seconds = time.monotonic() - recognition_started
-        count = postprocess_and_convert(
-            srt_path=srt_path,
-            smi_path=smi_path,
-            title=stem,
-            max_duration_sec=args.max_duration,
-        )
-        if "srt" not in args.formats and srt_path.exists():
-            srt_path.unlink()
-
         log(f"자막 생성 완료! (총 {count}개 대사 구간)")
-        if "srt" in args.formats:
-            log(f"  - SRT: {srt_path}")
-        if smi_path:
-            log(f"  - SMI: {smi_path}")
-        for fmt in ("vtt", "json", "txt"):
-            if fmt in args.formats:
-                log(f"  - {fmt.upper()}: {output_prefix}.{fmt}")
+        for fmt in dict.fromkeys(args.formats):
+            log(f"  - {fmt.upper()}: {output_prefix}.{fmt}")
 
         elapsed = time.monotonic() - started
         log(f"총 처리 시간: {elapsed:.1f}초")
@@ -277,7 +186,7 @@ def parse_args() -> argparse.Namespace:
         "-l",
         "--lang",
         default="ko",
-        help="음성 언어 코드 (기본값: ko, 자동감지: auto, 영어: en, 일본어: ja 등)",
+        help="음성 언어 코드 (기본값: ko, 혼합 언어: mixed, 자동감지: auto, 영어: en, 일본어: ja 등)",
     )
     parser.add_argument(
         "-m",
@@ -332,6 +241,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--start", type=float, default=0, help="시작 위치(초), 기본값 0")
     parser.add_argument("--duration", type=float, help="시험할 구간 길이(초), 생략하면 끝까지")
+    add_translator_option(parser)
     args = parser.parse_args()
     if not math.isfinite(args.start) or args.start < 0:
         parser.error("--start는 0 이상의 유한한 수여야 합니다.")
@@ -339,11 +249,7 @@ def parse_args() -> argparse.Namespace:
         parser.error("--duration은 0보다 큰 유한한 수여야 합니다.")
     if args.threads < 1:
         parser.error("--threads는 1 이상이어야 합니다.")
-    if not math.isfinite(args.max_duration) or args.max_duration < 0:
-        parser.error("--max-duration은 0 이상의 유한한 수여야 합니다.")
-    formats = {f.strip().lower() for f in args.formats.split(",") if f.strip()}
-    if not formats or formats - {"srt", "smi", "vtt", "json", "txt"}:
-        parser.error("--formats는 srt,smi,vtt,json,txt 중에서 선택하세요.")
+    validate_subtitle_args(parser, args)
     return args
 
 
@@ -361,6 +267,9 @@ def main() -> None:
             err("같은 이름의 영상이 출력 폴더에서 충돌합니다. 각각 다른 -o 경로로 실행하세요.")
             sys.exit(1)
     ensure_dependencies()
+    if args.lang == "mixed" and not shutil.which("whisper-vad-speech-segments"):
+        err("혼합 언어 감지 도구가 없습니다. bash setup_linux.sh를 실행하세요.")
+        sys.exit(1)
     model_dir = resolve_model_dir(args.model_dir)
 
     if args.model_path:
@@ -388,7 +297,7 @@ def main() -> None:
     for v in args.videos:
         try:
             process_video(Path(v).expanduser().resolve(), args, model_path, vad_path)
-        except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             err(f"처리 실패: {v}: {exc}")
             failures.append(v)
     if failures:

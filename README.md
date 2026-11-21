@@ -64,6 +64,23 @@ ln -s "$(pwd)/make_subtitle.py" /opt/homebrew/bin/make-subtitle
 
 ### 3. 주요 옵션 및 활용 예시
 
+한국어 사이에 영어·일본어 등 외국어 대사가 섞인 영상은 `--lang mixed`를 사용합니다.
+Silero로 음성 구간을 나누고 각 구간의 언어를 자동 감지합니다. 한국어 대사는 그대로 쓰고,
+외국어 대사는 번역해서 같은 자막에 넣습니다.
+
+```bash
+./make_subtitle.py "movie.mkv" --lang mixed --translator claude
+```
+
+번역기를 생략하면 `FKS_TRANSLATOR` 값 또는 `claude`를 사용합니다. 영어·일본어 등 번역할
+대사와 주변 자막 텍스트가 선택한 서비스에 전달되며 오디오 처리는 로컬에서 이루어집니다.
+혼합 모드는 Silero VAD와 다국어 Whisper 모델을 사용하고, 구간별 인식 때문에 기본 모드보다
+오래 걸릴 수 있습니다. 매우 짧은 대사나 동시에 나오는 대사는 언어가 잘못 감지될 수 있습니다.
+
+두 모드 모두 오디오 추출 시 영상의 시간축을 보존하고, 인식한 대사 시작보다 자막을
+0.1초 먼저 표시합니다. 종료 시각에는 이 0.1초를 적용하지 않습니다.
+
+
 ```bash
 # 특정 출력 폴더(-o)에 자막을 저장하고, 추출한 .wav 오디오 파일도 삭제하지 않고 보관(--keep-wav)
 ./make_subtitle.py "/Volumes/HDD1/movie/movie.mp4" -o ./output --keep-wav
@@ -95,14 +112,15 @@ ln -s "$(pwd)/make_subtitle.py" /opt/homebrew/bin/make-subtitle
 | :--- | :--- | :--- |
 | `videos` | (필수) | 자막을 생성할 원본 영상 파일 경로 (여러 개 지정 가능) |
 | `-o`, `--output-dir` | 원본 영상 폴더 | 자막 및 작업 파일을 저장할 디렉토리 경로 |
-| `-l`, `--lang` | `ko` | 음성 언어 코드 (`ko`, `en`, `ja`, `auto` 등) |
+| `-l`, `--lang` | `ko` | 음성 언어 코드 (`ko`, `en`, `ja`, `auto` 등) 또는 구간별 인식·번역 (`mixed`) |
+| `--translator` | `FKS_TRANSLATOR` 또는 `claude` | 혼합 언어 번역 CLI (`claude`, `codex`, `agy`) |
 | `-m`, `--model` | `large-v3-turbo` | Whisper 모델 선택 (`large-v3-turbo`, `large-v3`, `medium`, `small`, `base`) |
 | `--model-path` | `None` | 직접 다운로드한 커스텀 GGML `.bin` 모델 경로 지정 |
 | `--model-dir` | `~/.cache/whisper-cpp/models` | 모델 파일 다운로드 및 캐시 디렉토리 |
 | `-f`, `--formats` | `srt,smi` | 출력할 자막 포맷 (쉼표 구분: `srt,smi,vtt,json,txt`) |
 | `-t`, `--threads` | 최대 `8` | 연산에 사용할 CPU 스레드 수 |
 | `--no-vad` | `False` | Silero VAD(음성 구간 감지) 비활성화 |
-| `--keep-wav` | `False` | 작업 완료 후 임시 추출된 `.wav` 오디오 파일을 삭제하지 않고 보관 |
+| `--keep-wav` | `False` | 시간축을 맞춘 WAV를 보관하며 이름이 같은 기존 WAV는 보호 |
 | `--overwrite-audio` | `False` | 기존 추출된 `.wav` 파일이 있어도 새로 추출 |
 | `--max-duration` | `8.0` | 단일 자막의 최대 표시 시간(초). 초과 시 5초로 자동 보정 (`0`이면 비활성화) |
 

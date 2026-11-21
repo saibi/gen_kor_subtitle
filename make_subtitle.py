@@ -6,12 +6,14 @@ gen_kor_subtitle (make_subtitle.py)
 """
 
 import argparse
-import html
+import json
+import math
 import os
-import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 WHISPER_MODELS = {
@@ -123,7 +125,10 @@ def ensure_file_downloaded(path: Path, url: str, desc: str) -> Path:
     return path
 
 
-def extract_audio(video_path: Path, wav_path: Path, overwrite: bool = False) -> None:
+def extract_audio(
+    video_path: Path, wav_path: Path, overwrite: bool = False,
+    start: float = 0, duration: float | None = None,
+) -> None:
     """영상 파일에서 16kHz 모노 PCM WAV 오디오 트랙을 추출합니다."""
     if wav_path.exists() and not overwrite and wav_path.stat().st_size > 44:
         log(f"기존 추출된 오디오 파일을 재사용합니다: {wav_path}")
@@ -136,6 +141,8 @@ def extract_audio(video_path: Path, wav_path: Path, overwrite: bool = False) -> 
         "-i",
         str(video_path),
         "-vn",
+        "-af",
+        "aresample=async=1:first_pts=0",
         "-acodec",
         "pcm_s16le",
         "-ar",
@@ -147,6 +154,10 @@ def extract_audio(video_path: Path, wav_path: Path, overwrite: bool = False) -> 
         "-stats",
         str(wav_path),
     ]
+    if start:
+        cmd[2:2] = ["-ss", str(start)]
+    if duration is not None:
+        cmd[-1:-1] = ["-t", str(duration)]
     subprocess.run(cmd, check=True)
     log("오디오 추출 완료.")
 
@@ -159,6 +170,7 @@ def run_whisper(
     lang: str,
     threads: int,
     extra_formats: list[str],
+    cpu_only: bool = False,
 ) -> Path:
     """whisper-cli를 실행하여 음성 인식을 수행하고 SRT 파일을 생성합니다."""
     log(f"음성 인식(Whisper) 실행 중... (언어: {lang}, 모델: {model_path.name}, 스레드: {threads})")
@@ -180,6 +192,8 @@ def run_whisper(
 
     if vad_model_path and vad_model_path.exists():
         cmd.extend(["--vad", "-vm", str(vad_model_path)])
+    if cpu_only:
+        cmd.append("-ng")
 
     if "vtt" in extra_formats:
         cmd.append("-ovtt")
@@ -191,8 +205,7 @@ def run_whisper(
     subprocess.run(cmd, check=True)
     srt_path = Path(f"{output_prefix}.srt")
     if not srt_path.exists():
-        err(f"SRT 파일이 생성되지 않았습니다: {srt_path}")
-        sys.exit(1)
+        raise RuntimeError(f"SRT 파일이 생성되지 않았습니다: {srt_path}")
     return srt_path
 
 
@@ -218,135 +231,160 @@ def postprocess_and_convert(
     title: str,
     max_duration_sec: float = 8.0,
     capped_duration_sec: float = 5.0,
+    *,
+    formats=("srt",),
+    transcript: dict | None = None,
 ) -> int:
-    """
-    생성된 SRT 파일의 깨진 바이트 정리, 비정상적으로 긴 표시 시간 보정 후
-    SRT를 저장하고 필요시 SMI(SAMI) 포맷 파일을 생성합니다.
-    """
-    with open(srt_path, "r", encoding="utf-8", errors="replace") as f:
-        content = f.read().replace("\ufffd", "")
+    """대사 시작을 100ms 앞당기고 모든 자막 형식을 같은 시간축에서 생성합니다."""
+    from make_foreign_subtitle import parse_srt, write_smi, write_srt
 
-    blocks = re.split(r"\n\s*\n", content.strip())
-    max_ms = int(max_duration_sec * 1000)
+    def whisper_text(text):
+        return "\n".join(line.strip() for line in text.replace("\ufffd", "").splitlines() if line.strip())
+
+    if transcript is None and "json" in formats:
+        transcript = json.loads(srt_path.with_suffix(".json").read_text(encoding="utf-8"))
+    if transcript is None:
+        source = srt_path.read_text(encoding="utf-8", errors="replace")
+        segments = [
+            {"offsets": {"from": start, "to": end}, "text": text}
+            for start, end, text in parse_srt(source, clean=whisper_text)
+        ]
+    else:
+        segments = transcript["transcription"]
+
+    cues = []
+    updated_segments = []
     cap_ms = int(capped_duration_sec * 1000)
-
-    smi_lines = [
-        "<SAMI>",
-        "<HEAD>",
-        f"<TITLE>{html.escape(title)}</TITLE>",
-        '<STYLE TYPE="text/css">',
-        "<!--",
-        "P { margin-left:8pt; margin-right:8pt; margin-bottom:2pt; margin-top:2pt;",
-        "    text-align:center; font-size:20pt; font-family:arial, sans-serif;",
-        "    font-weight:normal; color:white; }",
-        ".KRCC { Name:한국어; lang:ko-KR; SAMIType:CC; }",
-        "-->",
-        "</STYLE>",
-        "</HEAD>",
-        "<BODY>",
-    ]
-
-    cleaned_srt_blocks = []
-    idx = 1
-
-    for b in blocks:
-        lines = [line.strip() for line in b.strip().split("\n") if line.strip()]
-        if len(lines) < 2:
+    for segment in sorted(segments, key=lambda s: s["offsets"]["from"]):
+        start, end = (segment["offsets"][key] for key in ("from", "to"))
+        text = segment["text"]
+        if transcript is not None:
+            text = whisper_text(text)
+        if not text or start < 0 or end <= start:
             continue
+        if max_duration_sec > 0 and (end - start) / 1000 > max_duration_sec:
+            end = min(end, start + cap_ms)
+        start = max(0, start - 100)
+        cues.append((start, end, text))
+        if transcript is not None:
+            updated_segments.append({
+                **segment, "text": text,
+                "offsets": {"from": start, "to": end},
+                "timestamps": {"from": ms_to_tc(start), "to": ms_to_tc(end)},
+            })
 
-        tc_idx = -1
-        for i, line in enumerate(lines):
-            if "-->" in line:
-                tc_idx = i
-                break
-        if tc_idx == -1 or tc_idx + 1 >= len(lines):
-            continue
-
-        tc_line = lines[tc_idx]
-        text_lines = lines[tc_idx + 1 :]
-        text = "\n".join(text_lines).strip()
-        if not text:
-            continue
-
-        start_tc, end_tc = [x.strip() for x in tc_line.split("-->")]
-        start_ms = tc_to_ms(start_tc)
-        end_ms = tc_to_ms(end_tc)
-
-        if max_ms > 0 and (end_ms - start_ms) > max_ms:
-            end_ms = start_ms + cap_ms
-            end_tc = ms_to_tc(end_ms)
-
-        cleaned_srt_blocks.append(f"{idx}\n{start_tc} --> {end_tc}\n{text}")
-        idx += 1
-
-        if smi_path is not None:
-            smi_text = "<br>".join(html.escape(l) for l in text_lines)
-            smi_lines.append(f"<SYNC Start={start_ms}><P Class=KRCC>\n{smi_text}")
-            smi_lines.append(f"<SYNC Start={end_ms}><P Class=KRCC>&nbsp;")
-
-    smi_lines.append("</BODY>")
-    smi_lines.append("</SAMI>")
-
-    with open(srt_path, "w", encoding="utf-8") as f:
-        f.write("\n\n".join(cleaned_srt_blocks) + "\n")
-
+    if "srt" in formats:
+        write_srt(cues, srt_path)
     if smi_path is not None:
-        with open(smi_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(smi_lines) + "\n")
+        write_smi(cues, smi_path, title)
+    if "vtt" in formats:
+        def vtt_time(ms):
+            return ms_to_tc(ms).replace(",", ".")
+        body = "\n\n".join(f"{vtt_time(start)} --> {vtt_time(end)}\n{text}" for start, end, text in cues)
+        srt_path.with_suffix(".vtt").write_text("WEBVTT\n\n" + body + "\n", encoding="utf-8")
+    if "txt" in formats:
+        srt_path.with_suffix(".txt").write_text("".join(text + "\n" for _, _, text in cues), encoding="utf-8")
+    if "json" in formats:
+        transcript["transcription"] = updated_segments
+        srt_path.with_suffix(".json").write_text(
+            json.dumps(transcript, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+        )
+    return len(cues)
 
-    return idx - 1
+
+def generate_subtitles(wav_path, prefix, args, model_path, vad_path, work_dir, recognize, *, cpu_only=False):
+    stage = work_dir / "subtitles"
+    destinations = {fmt: Path(f"{prefix}.{fmt}") for fmt in args.formats}
+    for dest in destinations.values():
+        if dest.is_dir():
+            raise IsADirectoryError(dest)
+    transcript = None
+    started = time.monotonic()
+    if args.lang == "mixed":
+        from mixed_subtitle import transcribe_mixed
+        transcript = transcribe_mixed(wav_path, work_dir, model_path, vad_path, args.threads,
+                                      args.translator, prefix.name, cpu_only=cpu_only)
+    else:
+        recognize(wav_path=wav_path, output_prefix=stage, model_path=model_path,
+                  vad_model_path=vad_path, lang=args.lang, threads=args.threads,
+                  extra_formats=["json"] if "json" in args.formats else [])
+    recognition_seconds = time.monotonic() - started
+    count = postprocess_and_convert(
+        stage.with_suffix(".srt"), stage.with_suffix(".smi") if "smi" in args.formats else None,
+        prefix.name, args.max_duration, formats=args.formats, transcript=transcript,
+    )
+    for fmt, dest in destinations.items():
+        stage.with_suffix("." + fmt).replace(dest)
+    return count, recognition_seconds
+
+
+def audio_fingerprint(path: Path) -> list:
+    info = path.stat()
+    return [str(path.resolve()), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
 
 
 def process_video(video_path: Path, args: argparse.Namespace, model_path: Path, vad_path: Path | None) -> None:
-    if not video_path.exists():
-        err(f"영상 파일을 찾을 수 없습니다: {video_path}")
-        return
-
-    out_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else video_path.parent
+    out_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else video_path.parent.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    stem = video_path.stem
-    output_prefix = out_dir / stem
-    wav_path = out_dir / f"{stem}.wav"
-    srt_path = out_dir / f"{stem}.srt"
-    smi_path = out_dir / f"{stem}.smi" if "smi" in args.formats else None
+    prefix = out_dir / video_path.stem
+    saved_wav = Path(f"{prefix}.wav")
+    manifest = Path(f"{saved_wav}.aligned.json")
+    safe_to_replace = saved_wav.resolve() != video_path.resolve() and not saved_wav.is_symlink()
+    source = audio_fingerprint(video_path)
+    try:
+        reusable = safe_to_replace and json.loads(manifest.read_text(encoding="utf-8")) == [
+            source, audio_fingerprint(saved_wav),
+        ]
+    except (OSError, ValueError):
+        reusable = False
 
     log(f"=== 작업 시작: {video_path.name} ===")
     log(f"출력 경로: {out_dir}")
-
-    try:
-        extract_audio(video_path, wav_path, overwrite=args.overwrite_audio)
-        run_whisper(
-            wav_path=wav_path,
-            output_prefix=output_prefix,
-            model_path=model_path,
-            vad_model_path=vad_path,
-            lang=args.lang,
-            threads=args.threads,
-            extra_formats=args.formats,
-        )
-        count = postprocess_and_convert(
-            srt_path=srt_path,
-            smi_path=smi_path,
-            title=stem,
-            max_duration_sec=args.max_duration,
-        )
-        if "srt" not in args.formats and srt_path.exists():
-            srt_path.unlink()
-
+    with tempfile.TemporaryDirectory(prefix="subtitle-", dir=out_dir) as tmp:
+        work_dir = Path(tmp)
+        wav_path = work_dir / "audio.wav"
+        if reusable and not args.overwrite_audio:
+            os.link(saved_wav, wav_path)
+            log(f"기존 정렬 오디오 파일을 재사용합니다: {saved_wav}")
+        else:
+            extract_audio(video_path, wav_path, overwrite=True)
+            if args.keep_wav:
+                if not safe_to_replace or (saved_wav.exists() and not args.overwrite_audio and not reusable):
+                    with tempfile.NamedTemporaryFile(
+                        prefix=f"{prefix.name}-aligned-", suffix=".wav", dir=out_dir, delete=False,
+                    ) as alternative:
+                        saved_wav = Path(alternative.name)
+                    manifest = Path(f"{saved_wav}.aligned.json")
+                os.link(wav_path, work_dir / "save.wav")
+                (work_dir / "save.wav").replace(saved_wav)
+                metadata = work_dir / "aligned.json"
+                fingerprint = audio_fingerprint(wav_path)
+                fingerprint[0] = str(saved_wav)
+                metadata.write_text(json.dumps([source, fingerprint]), encoding="utf-8")
+                metadata.replace(manifest)
+                log(f"추출 오디오 보관: {saved_wav}")
+        count, _ = generate_subtitles(wav_path, prefix, args, model_path, vad_path, work_dir, run_whisper)
         log(f"자막 생성 완료! (총 {count}개 대사 구간)")
-        if "srt" in args.formats:
-            log(f"  - SRT: {srt_path}")
-        if smi_path:
-            log(f"  - SMI: {smi_path}")
-        for fmt in ("vtt", "json", "txt"):
-            if fmt in args.formats:
-                log(f"  - {fmt.upper()}: {output_prefix}.{fmt}")
+        for fmt in dict.fromkeys(args.formats):
+            log(f"  - {fmt.upper()}: {prefix}.{fmt}")
 
-    finally:
-        if not args.keep_wav and wav_path.exists():
-            log(f"임시 오디오 파일 삭제: {wav_path.name}")
-            wav_path.unlink()
+
+def add_translator_option(parser):
+    from make_foreign_subtitle import TRANSLATORS
+    parser.add_argument("--translator", choices=TRANSLATORS,
+                        help="혼합 언어 온라인 번역기 (기본값: FKS_TRANSLATOR 또는 claude)")
+
+
+def validate_subtitle_args(parser, args):
+    if args.lang == "mixed" and args.no_vad:
+        parser.error("--lang mixed에는 Silero VAD가 필요합니다. --no-vad를 빼 주세요.")
+    if args.translator is not None and args.lang != "mixed":
+        parser.error("--translator는 --lang mixed와 함께 사용하세요.")
+    if not math.isfinite(args.max_duration) or args.max_duration < 0:
+        parser.error("--max-duration은 0 이상의 유한한 수여야 합니다.")
+    formats = {f.strip().lower() for f in args.formats.split(",") if f.strip()}
+    if not formats or formats - {"srt", "smi", "vtt", "json", "txt"}:
+        parser.error("--formats는 srt,smi,vtt,json,txt 중에서 선택하세요.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -379,7 +417,7 @@ def parse_args() -> argparse.Namespace:
         "-l",
         "--lang",
         default="ko",
-        help="음성 언어 코드 (기본값: ko, 자동감지: auto, 영어: en, 일본어: ja 등)",
+        help="음성 언어 코드 (기본값: ko, 혼합 언어: mixed, 자동감지: auto, 영어: en, 일본어: ja 등)",
     )
     parser.add_argument(
         "-m",
@@ -432,7 +470,10 @@ def parse_args() -> argparse.Namespace:
         default=8.0,
         help="한 자막의 최대 표시 시간(초). 이를 초과하면 5초로 자동 보정 (기본값: 8.0, 0이면 비활성화)",
     )
-    return parser.parse_args()
+    add_translator_option(parser)
+    args = parser.parse_args()
+    validate_subtitle_args(parser, args)
+    return args
 
 
 def main() -> None:
@@ -440,6 +481,9 @@ def main() -> None:
     args.formats = [fmt.strip().lower() for fmt in args.formats.split(",") if fmt.strip()]
 
     ensure_dependencies(auto_install=True)
+    if args.lang == "mixed" and not shutil.which("whisper-vad-speech-segments"):
+        err("혼합 언어 감지 도구가 없습니다. Homebrew의 whisper.cpp를 확인하세요.")
+        sys.exit(1)
     model_dir = resolve_model_dir(args.model_dir)
 
     if args.model_path:
@@ -463,8 +507,15 @@ def main() -> None:
             "Silero VAD 음성 감지 모델",
         )
 
+    failed = False
     for v in args.videos:
-        process_video(Path(v).expanduser().resolve(), args, model_path, vad_path)
+        try:
+            process_video(Path(v).expanduser().resolve(), args, model_path, vad_path)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            err(f"처리 실패: {v}: {exc}")
+            failed = True
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

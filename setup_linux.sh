@@ -25,7 +25,7 @@ elif [ "$(git -C tools/whisper.cpp rev-parse HEAD)" != "$whisper_revision" ] ||
     exit 1
 fi
 cmake -S tools/whisper.cpp -B tools/whisper.cpp/build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=OFF -DGGML_VULKAN=OFF
-cmake --build tools/whisper.cpp/build --config Release --target whisper-cli -j 2
+cmake --build tools/whisper.cpp/build --config Release --target whisper-cli whisper-vad-speech-segments -j 2
 printf 'whisper.cpp revision: '
 git -C tools/whisper.cpp rev-parse HEAD
 printf '설치 완료. python3 make_subtitle_linux.py --help 로 실행 옵션을 확인하세요.\n'

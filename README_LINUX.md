@@ -28,6 +28,17 @@ python3 make_subtitle_linux.py '../영상.mp4' -o ./output --model-dir ./models
 --keep-wav는 고유 폴더에 오디오를 보관합니다.
 --overwrite-audio는 기존 인터페이스 호환용이며 항상 새로 추출합니다.
 
+혼합 언어 영상은 `--lang mixed`로 구간별 언어 감지와 외국어 대사의 한국어 번역을 켭니다.
+
+```bash
+python3 make_subtitle_linux.py '../영상.mp4' --lang mixed --translator claude -o ./output
+```
+
+기존 설치에 `whisper-vad-speech-segments`가 없으면 `bash setup_linux.sh`로 추가합니다.
+혼합 모드는 다국어 모델과 Silero VAD가 필요합니다. 전사는 로컬에서 진행하며 외국어 대사와
+주변 자막 텍스트는 번역 CLI로 전송됩니다. 혼합 모드의 벤치마크 인식 시간에는 번역이 포함됩니다.
+기본 모드와 혼합 모드 모두 보정된 대사 시작보다 자막을 0.1초 먼저 표시합니다.
+
 -t 2와 -t 4를 같은 구간에 비교할 수 있습니다. -m base도 지원합니다.
 기본 양자화 모델 외에 -m base-q5_1도 지원합니다. 다른 모델은 --model-path로 지정할 수 있습니다.
 각 실행의 실제 오디오 길이, 인식 시간, 전체 처리 시간은 자막 옆 *.benchmark.json에 저장합니다.
