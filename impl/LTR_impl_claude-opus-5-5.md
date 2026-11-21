@@ -1,7 +1,7 @@
 # [LTR] 구현 노트
 
 - 계획: plan/LTR_plan_claude-opus-5-5.md
-- 구현 커밋: (커밋 후 기록) (리뷰 반영 커밋은 review/LTR_refine_*.md)
+- 구현 커밋: 95242ab (리뷰 반영 커밋은 review/LTR_refine_*.md)
 
 ## 아키텍처
 
