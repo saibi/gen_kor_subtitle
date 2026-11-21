@@ -9,6 +9,8 @@ from pathlib import Path
 
 from make_foreign_subtitle import TRANSLATORS, translate_selected
 
+MAX_CLIP_FRAMES = 25 * 16000
+
 
 def speech_ranges(wav_path: Path, vad_path: Path, threads: int, frames: int) -> list[tuple[int, int]]:
     result = subprocess.run(
@@ -28,10 +30,14 @@ def speech_ranges(wav_path: Path, vad_path: Path, threads: int, frames: int) -> 
     last_end = 0
     for index, (number, start, end) in enumerate(segments):
         # CLI reports centiseconds, with two decimal places.
-        first, last = (min(frames, int(t.replace(".", "")) * 16 // 10) for t in (start, end))
-        if int(number) != index or not last_end <= first < last:
+        first, last = (int(t.replace(".", "")) * 16 // 10 for t in (start, end))
+        if int(number) != index or first >= last:
             raise ValueError("Silero가 잘못된 음성 구간을 반환했습니다.")
-        ranges.append((first, last))
+        first, last = max(first, last_end), min(last, frames)
+        if first >= last:
+            continue
+        # shortcut: Silero can rejoin forced splits, so bound long clips at fixed intervals.
+        ranges.extend((i, min(i + MAX_CLIP_FRAMES, last)) for i in range(first, last, MAX_CLIP_FRAMES))
         last_end = last
     return ranges
 
@@ -41,14 +47,21 @@ def needs_translation(text: str, language: str) -> bool:
         return True
     latin = re.findall(r"[^\W\d_]+", text)
     words = [word for word in latin if re.search(r"[a-zA-Z]", word)]
-    if language != "ko" and not re.search(r"[가-힣]", text):
-        return any(c.isalpha() for c in text)
+    if not re.search(r"[가-힣]", text):
+        if language != "ko":
+            return any(c.isalpha() for c in text)
+        return bool(words) and not (len(words) == 1 and words[0].isupper())
     return sum(word.islower() for word in words) >= 2
 
 
-def transcribe_mixed(wav_path, work_dir, model_path, vad_path, threads, translator, title, *, cpu_only=False):
+def transcribe_mixed(wav_path, work_dir, model_path, vad_path, threads, translator, *, cpu_only=False):
     if vad_path is None:
         raise ValueError("혼합 언어 인식에는 Silero VAD 모델이 필요합니다.")
+    with model_path.open("rb") as model:
+        header = model.read(8)
+    # Match whisper.cpp's GGML header and multilingual vocabulary check.
+    if len(header) == 8 and header[:4] == b"lmgg" and int.from_bytes(header[4:], "little") < 51865:
+        raise ValueError("혼합 언어 모드에는 다국어 Whisper 모델이 필요합니다.")
     segments = []
     transcript = {
         "params": {"model": str(model_path), "language": "mixed", "translate": True},
@@ -103,7 +116,7 @@ def transcribe_mixed(wav_path, work_dir, model_path, vad_path, threads, translat
         engine = translator or os.environ.get("FKS_TRANSLATOR", "claude")
         if engine not in TRANSLATORS:
             raise ValueError(f"지원하지 않는 번역기입니다: {engine}")
-        translations = translate_selected([segment["text"] for segment in segments], targets, engine, title)
+        translations = translate_selected([segment["text"] for segment in segments], targets, engine)
         for index, text in translations.items():
             segments[index]["text"] = text
     return transcript

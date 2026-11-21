@@ -142,7 +142,7 @@ def extract_audio(
         str(video_path),
         "-vn",
         "-af",
-        "aresample=async=1:first_pts=0",
+        "aresample=async=1:first_pts=0:min_hard_comp=0.02",
         "-acodec",
         "pcm_s16le",
         "-ar",
@@ -242,7 +242,7 @@ def postprocess_and_convert(
         return "\n".join(line.strip() for line in text.replace("\ufffd", "").splitlines() if line.strip())
 
     if transcript is None and "json" in formats:
-        transcript = json.loads(srt_path.with_suffix(".json").read_text(encoding="utf-8"))
+        transcript = json.loads(srt_path.with_suffix(".json").read_text(encoding="utf-8", errors="replace"))
     if transcript is None:
         source = srt_path.read_text(encoding="utf-8", errors="replace")
         segments = [
@@ -294,7 +294,9 @@ def postprocess_and_convert(
 
 def generate_subtitles(wav_path, prefix, args, model_path, vad_path, work_dir, recognize, *, cpu_only=False):
     stage = work_dir / "subtitles"
-    destinations = {fmt: Path(f"{prefix}.{fmt}") for fmt in args.formats}
+    destinations = {fmt: Path(f"{prefix}.{fmt}") for fmt in dict.fromkeys(args.formats)}
+    if "srt" in destinations:
+        destinations["srt"] = destinations.pop("srt")
     for dest in destinations.values():
         if dest.is_dir():
             raise IsADirectoryError(dest)
@@ -303,7 +305,7 @@ def generate_subtitles(wav_path, prefix, args, model_path, vad_path, work_dir, r
     if args.lang == "mixed":
         from mixed_subtitle import transcribe_mixed
         transcript = transcribe_mixed(wav_path, work_dir, model_path, vad_path, args.threads,
-                                      args.translator, prefix.name, cpu_only=cpu_only)
+                                      args.translator, cpu_only=cpu_only)
     else:
         recognize(wav_path=wav_path, output_prefix=stage, model_path=model_path,
                   vad_model_path=vad_path, lang=args.lang, threads=args.threads,
@@ -313,8 +315,12 @@ def generate_subtitles(wav_path, prefix, args, model_path, vad_path, work_dir, r
         stage.with_suffix(".srt"), stage.with_suffix(".smi") if "smi" in args.formats else None,
         prefix.name, args.max_duration, formats=args.formats, transcript=transcript,
     )
-    for fmt, dest in destinations.items():
-        stage.with_suffix("." + fmt).replace(dest)
+    outputs = {stage.with_suffix("." + fmt): dest for fmt, dest in destinations.items()}
+    for path in outputs:
+        if not path.is_file():
+            raise OSError(f"준비된 자막 파일이 없습니다: {path.name}")
+    for path, dest in outputs.items():
+        path.replace(dest)
     return count, recognition_seconds
 
 
@@ -323,20 +329,31 @@ def audio_fingerprint(path: Path) -> list:
     return [str(path.resolve()), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
 
 
+def audio_manifest(wav_path: Path) -> Path:
+    return Path(f"{wav_path}.aligned.json")
+
+
+def find_saved_audio(prefix, video_path, source, overwrite):
+    for wav_path in (Path(f"{prefix}.wav"), Path(f"{prefix}.aligned.wav")):
+        if wav_path == video_path or wav_path.is_symlink() or wav_path.is_dir():
+            continue
+        try:
+            reusable = json.loads(audio_manifest(wav_path).read_text(encoding="utf-8")) == [
+                source, audio_fingerprint(wav_path),
+            ]
+        except (OSError, ValueError):
+            reusable = False
+        if reusable or overwrite or not wav_path.exists():
+            return wav_path, reusable
+    return None, False
+
+
 def process_video(video_path: Path, args: argparse.Namespace, model_path: Path, vad_path: Path | None) -> None:
     out_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else video_path.parent.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = out_dir / video_path.stem
-    saved_wav = Path(f"{prefix}.wav")
-    manifest = Path(f"{saved_wav}.aligned.json")
-    safe_to_replace = saved_wav.resolve() != video_path.resolve() and not saved_wav.is_symlink()
     source = audio_fingerprint(video_path)
-    try:
-        reusable = safe_to_replace and json.loads(manifest.read_text(encoding="utf-8")) == [
-            source, audio_fingerprint(saved_wav),
-        ]
-    except (OSError, ValueError):
-        reusable = False
+    saved_wav, reusable = find_saved_audio(prefix, video_path.resolve(), source, args.overwrite_audio)
 
     log(f"=== 작업 시작: {video_path.name} ===")
     log(f"출력 경로: {out_dir}")
@@ -349,19 +366,18 @@ def process_video(video_path: Path, args: argparse.Namespace, model_path: Path, 
         else:
             extract_audio(video_path, wav_path, overwrite=True)
             if args.keep_wav:
-                if not safe_to_replace or (saved_wav.exists() and not args.overwrite_audio and not reusable):
+                if saved_wav is None:
                     with tempfile.NamedTemporaryFile(
                         prefix=f"{prefix.name}-aligned-", suffix=".wav", dir=out_dir, delete=False,
                     ) as alternative:
                         saved_wav = Path(alternative.name)
-                    manifest = Path(f"{saved_wav}.aligned.json")
                 os.link(wav_path, work_dir / "save.wav")
                 (work_dir / "save.wav").replace(saved_wav)
                 metadata = work_dir / "aligned.json"
                 fingerprint = audio_fingerprint(wav_path)
                 fingerprint[0] = str(saved_wav)
                 metadata.write_text(json.dumps([source, fingerprint]), encoding="utf-8")
-                metadata.replace(manifest)
+                metadata.replace(audio_manifest(saved_wav))
                 log(f"추출 오디오 보관: {saved_wav}")
         count, _ = generate_subtitles(wav_path, prefix, args, model_path, vad_path, work_dir, run_whisper)
         log(f"자막 생성 완료! (총 {count}개 대사 구간)")
