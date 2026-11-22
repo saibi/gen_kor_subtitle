@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Finder 우클릭 > 빠른 동작(서비스)에 자막 생성 항목을 설치/제거합니다.
-  - 한국어 자막 만들기         : make_subtitle.py --lang mixed
+  - 한국어 자막 만들기         : make_subtitle.py
   - 외국영화 한국어 자막 만들기 : make_foreign_subtitle.py
 
     ./install_quick_action.py              # 설치
@@ -29,7 +29,6 @@ HERE = Path(__file__).resolve().parent
 def shell_command(script: str) -> str:
     # Automator는 PATH가 최소한이라 brew와 에이전트 CLI(~/.local/bin) 경로를 직접 추가하고,
     # 설치에 쓴 python(3.10+)을 그대로 사용한다 (/usr/bin/python3는 3.9일 수 있음).
-    options = " --lang mixed" if script == "make_subtitle.py" else ""
     py, script, log = (shlex.quote(str(p)) for p in (sys.executable, HERE / script, LOG))
     # 파일명은 AppleScript 소스가 아니라 argv로 넘긴다 (따옴표가 든 파일명이 코드로 실행되지 않게)
     return f"""export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
@@ -38,7 +37,7 @@ for f in "$@"; do
   name="${{f:t}}"
   echo "===== $(date) $f" >> {log}
   start=$(($(wc -l < {log}) + 1))
-  if {py} {script}{options} "$f" >> {log} 2>&1; then
+  if {py} {script} "$f" >> {log} 2>&1; then
     notify "$name" "자막 생성 완료"
   else
     # 알림은 설정에 따라 안 보일 수 있어 실패는 경고창으로 띄운다
